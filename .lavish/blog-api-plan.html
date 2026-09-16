@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="luxury">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Open Blog — Multi-tenant Blog Platform: Implementation Plan</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+  :where([style*="display: grid"], [style*="display:grid"], [style*="display: flex"], [style*="display:flex"]) > * {
+    min-width: 0;
+  }
+  :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .badge, .label) {
+    overflow-wrap: anywhere;
+  }
+  :where(img, svg, video, canvas, iframe) {
+    max-width: 100%;
+    height: auto;
+  }
+  html { scroll-behavior: smooth; }
+  .mermaid { display: flex; justify-content: center; margin: 1rem 0; }
+  .mermaid svg { max-width: 100%; height: auto; }
+  .section-link { scroll-margin-top: 5rem; }
+</style>
+</head>
+<body class="bg-base-100 text-base-content">
+
+<header class="sticky top-0 z-50 backdrop-blur bg-base-100/80 border-b border-base-content/10">
+  <div class="navbar mx-auto max-w-6xl px-4">
+    <div class="navbar-start">
+      <a class="btn btn-ghost text-lg font-semibold">Open Blog</a>
+    </div>
+    <div class="navbar-end flex gap-2">
+      <span class="badge badge-soft badge-info hidden sm:inline-flex">Language-agnostic</span>
+      <span class="badge badge-soft badge-success hidden sm:inline-flex">R2 adopted</span>
+      <a href="#decisions" class="btn btn-sm btn-outline btn-primary">Confirm decisions</a>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-6xl px-4 pb-24">
+
+  <!-- ============ HERO ============ -->
+  <section class="pt-10 pb-6">
+    <p class="badge badge-soft badge-neutral mb-3">Implementation plan · pre-code · v0 proposal</p>
+    <h1 class="text-4xl lg:text-5xl font-bold leading-tight">A multi-tenant blog platform: one authoring API, many public sites</h1>
+    <p class="mt-4 text-lg text-base-content/70 max-w-3xl">
+      One REST API backs an <strong>editor UI</strong> for writing and publishing markdown posts, and any number of
+      independent <strong>reader sites</strong>. Tenants are data-isolated by the database itself (PostgreSQL row-level
+      security), authentication covers email+password plus Google/GitHub SSO, and images live in Cloudflare R2
+      (decision adopted). This plan is deliberately framework- and language-agnostic.
+    </p>
+    <div class="flex flex-wrap gap-3 mt-6">
+      <div class="badge badge-lg badge-primary">Auth + 2 SSO providers</div>
+      <div class="badge badge-lg badge-secondary">RBAC + RLS tenancy</div>
+      <div class="badge badge-lg badge-accent">Markdown posts</div>
+      <div class="badge badge-lg badge-info">Cloudflare R2 images</div>
+      <div class="badge badge-lg badge-soft badge-primary">Horizontally scalable</div>
+      <div class="badge badge-lg badge-soft badge-success">Superusers see all tenants</div>
+    </div>
+  </section>
+
+  <!-- ============ DECISION BANNER ============ -->
+  <section id="decisions" class="section-link mt-4">
+    <div class="alert alert-success sm:alert-horizontal">
+      <div class="min-w-0">
+        <div class="font-semibold">Adopted defaults for this review</div>
+        <p class="text-sm text-base-content/70">Each default is applied in the plan below. Flag any you want changed during review; that's the purpose of this document.</p>
+        <ul class="text-sm mt-2 grid sm:grid-cols-2 gap-x-6 gap-y-1 list-disc pl-5 text-base-content/80">
+          <li>REST over GraphQL — public API scales &lt; cache/CDN</li>
+          <li>Opaque session tokens in DB (revocable), not stateless JWT</li>
+          <li>Shared PostgreSQL schema + row-level security per tenant</li>
+          <li>Shared R2 bucket with per-tenant key prefix</li>
+          <li>Email+password kept as optional fallback alongside SSO</li>
+          <li>Auth lives in the same backend as posts — no third-party IdP service</li>
+          <li>GFM + server-side syntax highlighting for rendering</li>
+          <li>Invite by email + role-baked invite links</li>
+          <li>Image variants (480/800/1200 + WebP) generated at upload</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ NAV ============ -->
+  <nav class="mt-8 hidden lg:block">
+    <ul class="menu menu-horizontal menu-sm bg-base-200 rounded-box px-2 flex-wrap">
+      <li><a href="#goal">1 · Goal</a></li>
+      <li><a href="#stories">2 · User stories</a></li>
+      <li><a href="#arch">3 · Architecture</a></li>
+      <li><a href="#tenancy">4 · Tenancy</a></li>
+      <li><a href="#authz">5 · Authorization</a></li>
+      <li><a href="#authn">6 · Auth flows</a></li>
+      <li><a href="#data">7 · Data model</a></li>
+      <li><a href="#api">8 · API surface</a></li>
+      <li><a href="#images">9 · Images &amp; import</a></li>
+      <li><a href="#perf">10 · Performance</a></li>
+      <li><a href="#uis">11 · UI strategy</a></li>
+      <li><a href="#risks">12 · Risks</a></li>
+    </ul>
+  </nav>
+
+  <!-- ============ 1 GOAL ============ -->
+  <section id="goal" class="section-link mt-10">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">1</span>
+      <h2 class="text-2xl font-bold">Goal &amp; scope</h2>
+    </div>
+    <div class="grid md:grid-cols-3 gap-4 mt-4">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Authoring side</h3>
+          <p class="text-sm text-base-content/70">One editor UI (per tenant or cross-tenant for admins) writes markdown posts in an interactive live-preview editor, manages draft → publish lifecycle, uploads images — and imports existing documents (PDF · DOCX · Google Docs · open formats) straight into markdown drafts. All mutations go through the authenticated admin API.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Reading side</h3>
+          <p class="text-sm text-base-content/70">Many independent reader UIs, each mapped to exactly one tenant (by slug/subdomain). They consume a cachable read-only public API and render sanitized HTML. Public UIs never hold credentials.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Out of scope</h3>
+          <p class="text-sm text-base-content/70">Comments, search index, subscriptions/newsletters, translation, A/B tools. Deltas are noted in <a href="#risks" class="link">risks</a> so they don't sneak into the schema later.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 2 USER STORIES ============ -->
+  <section id="stories" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">2</span>
+      <h2 class="text-2xl font-bold">User stories — API behavior by persona</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Each story pins down <strong>exact API behavior</strong> with Given / When / Then acceptance criteria. These are the
+      contract tests the implementation must pass; IDs (ST-1 … ST-23) are referenced from build tasks. Roles come from the
+      authorization matrix in section 5.
+    </p>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-4">
+      <div class="collapse-title text-base font-semibold">Guests &amp; reader sites — "any visitor reads a site"</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-1</span>
+            <span class="font-semibold text-sm">Guest reads a published post from a reader site</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> tenant <code class="font-mono text-xs">alpha</code> has post <code class="font-mono text-xs">hello-world</code> with status <code class="font-mono text-xs">published</code></li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">GET /public/alpha/posts/hello-world</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code> with title, excerpt, sanitized HTML body, author display name, <code class="font-mono text-xs">published_at</code>, and image URLs</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> response carries <code class="font-mono text-xs">ETag</code> + <code class="font-mono text-xs">Cache-Control</code> so edge caching serves repeat reads</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-2</span>
+            <span class="font-semibold text-sm">Guest never sees a draft</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> tenant <code class="font-mono text-xs">alpha</code> has post <code class="font-mono text-xs">draft-idea</code> with status <code class="font-mono text-xs">draft</code></li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> guest calls <code class="font-mono text-xs">GET /public/alpha/posts/draft-idea</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> the API returns <code class="font-mono text-xs">404</code>, indistinguishable from a slug that does not exist — drafts are not enumerable via the public API</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-3</span>
+            <span class="font-semibold text-sm">Each site is isolated to its own tenant</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> a reader site bound to <code class="font-mono text-xs">beta</code> lists posts via <code class="font-mono text-xs">GET /public/beta/posts</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> results contain only <code class="font-mono text-xs">beta</code>'s published posts; identical slugs in <code class="font-mono text-xs">alpha</code> are independent namespaces</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> listing excludes <code class="font-mono text-xs">archived</code> posts</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-4</span>
+            <span class="font-semibold text-sm">Guest paginates a site listing</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> a site has more published posts than one page</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">GET /public/alpha/posts?before=&lt;cursor&gt;</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> a keyset cursor (<code class="font-mono text-xs">next_cursor</code>) is returned, newest-first; list payloads carry metadata only (no markdown body)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-3">
+      <div class="collapse-title text-base font-semibold">Author — "I write my own posts"</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-5</span>
+            <span class="font-semibold text-sm">Author creates a draft</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> the author has a session with active tenant <code class="font-mono text-xs">alpha</code> (role <code class="font-mono text-xs">author</code>)</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/posts</code> with <code class="font-mono text-xs">{title, content_markdown}</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">201</code>, <code class="font-mono text-xs">status = draft</code>, <code class="font-mono text-xs">author_id = me</code>, tenant from the session (any client-supplied tenant field is ignored)</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> the draft is not visible through <code class="font-mono text-xs">/public</code> (ST-2 behavior)</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-6</span>
+            <span class="font-semibold text-sm">Author edits own draft, not others'</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> the author's own draft <code class="font-mono text-xs">:id</code></li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">PATCH /admin/posts/:id</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>, markdown/metadata updated, <code class="font-mono text-xs">updated_at</code> bumped</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> the same author targets another author's draft in the same tenant</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">403</code>, and that draft is absent from <code class="font-mono text-xs">GET /admin/posts</code></li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-7</span>
+            <span class="font-semibold text-sm">Author uploads an image into a draft</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/media/presign</code> with <code class="font-mono text-xs">{post_id}</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">201</code> with a short-lived presigned PUT URL whose key is pinned to the tenant's prefix (cannot name another tenant's object)</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> the author PUTs bytes to R2, then calls <code class="font-mono text-xs">POST /admin/media/confirm</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> a <code class="font-mono text-xs">post_images</code> row is recorded, a worker generates the 480/800/1200 + WebP variants, and the markdown may reference the CDN URL</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-8</span>
+            <span class="font-semibold text-sm">Author cannot publish, nor edit published posts</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/posts/:id/publish</code> or <code class="font-mono text-xs">PATCH /admin/posts/:id</code> on a published post</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">403</code> — publishing and published-post edits require <code class="font-mono text-xs">editor</code>+</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-23</span>
+            <span class="font-semibold text-sm">Author imports a document into a draft as markdown</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/imports</code> with a file (PDF · DOCX · ODT · RTF · HTML) or <code class="font-mono text-xs">{source: "google_docs"}</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">202</code> <code class="font-mono text-xs">{import_id, status: "converting"}</code>; the original is stored and handed to the conversion worker</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> <code class="font-mono text-xs">GET /admin/imports/:id</code> returns status, the converted markdown preview, and a per-format fidelity warning when the conversion may be lossy (e.g. PDF)</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/imports/:id/apply</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> a draft is created under the exact ST-5 rules (status <code class="font-mono text-xs">draft</code>, <code class="font-mono text-xs">author_id = me</code>, tenant from session) with <code class="font-mono text-xs">content_markdown</code> set to the converted body, and the import row records <code class="font-mono text-xs">post_id</code></li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> the conversion fails or the format is unsupported</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">GET /admin/imports/:id</code> reports an <code class="font-mono text-xs">error</code> plus a remediation hint and no post is ever partially created</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">source: "google_docs"</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> the worker exports the document through the author's linked Google identity (<code class="font-mono text-xs">identities</code>); a linked account lacking the <code class="font-mono text-xs">drive.readonly</code> export scope is sent through a re-consent flow first</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-3">
+      <div class="collapse-title text-base font-semibold">Editor — "I curate and publish"</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-9</span>
+            <span class="font-semibold text-sm">Editor publishes any draft in the tenant</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> a draft exists in the editor's tenant (own or another author's)</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/posts/:id/publish</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>, <code class="font-mono text-xs">status = published</code>, <code class="font-mono text-xs">published_at</code> set server-side</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> immediately visible: caches for this tenant are purged and ST-1 now returns <code class="font-mono text-xs">200</code></li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-10</span>
+            <span class="font-semibold text-sm">Editor unpublishes / archives</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/posts/:id/unpublish</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">status = draft</code>; guest reads return <code class="font-mono text-xs">404</code> and caches are purged for that tenant</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> <code class="font-mono text-xs">status = archived</code> hides it from public listing while keeping admin edit access for editor+</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-11</span>
+            <span class="font-semibold text-sm">Editor edits any post in the tenant</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> any post (any author, draft or published) in the editor's tenant</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">PATCH /admin/posts/:id</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>; a published post's public representation reflects the edit with cache invalidation, and <code class="font-mono text-xs">published_at</code> is unchanged</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-3">
+      <div class="collapse-title text-base font-semibold">Tenant admin &amp; owner — "I manage people and the site"</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-12</span>
+            <span class="font-semibold text-sm">Admin invites a member by email (SSO join)</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/members</code> with <code class="font-mono text-xs">{email, role: "editor"}</code> — or the admin generates a role-baked tenant invite link</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">201</code> and an invitation row is stored for that tenant</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> the invitee joins on first sign-in: an email invite consumes only when the SSO email is <em>verified</em> and matches; a link invite skips straight to the link's baked role. Repeat sign-ins are idempotent</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-13</span>
+            <span class="font-semibold text-sm">Admin changes a member's role — effective immediately</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">PATCH /admin/members/:userId</code> with a new role</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>; the change applies on the member's <em>next</em> request — sessions re-resolve membership per request, no re-login</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> demoting to a weaker role (e.g. author) immediately revokes the removed capabilities (<code class="font-mono text-xs">403</code>)</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-14</span>
+            <span class="font-semibold text-sm">Admin removes a member</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">DELETE /admin/members/:userId</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">204</code>; the removed user's active session immediately loses tenant access (<code class="font-mono text-xs">403</code>)</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-15</span>
+            <span class="font-semibold text-sm">Owner manages tenant settings</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> owner calls <code class="font-mono text-xs">PATCH /admin/tenants/:id</code> (site name, branding, SEO defaults)</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>; reader sites see the change on <code class="font-mono text-xs">GET /public/:slug/site</code> after cache invalidation</li>
+            <li class="text-sm text-base-content/70"><strong>And</strong> owner may <code class="font-mono text-xs">DELETE /admin/tenants/:id</code> → <code class="font-mono text-xs">204</code>; a tenant admin may not (<code class="font-mono text-xs">403</code>)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-3">
+      <div class="collapse-title text-base font-semibold">Super admin — "I run the whole platform"</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-16</span>
+            <span class="font-semibold text-sm">Super admin provisions a new tenant site</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /admin/tenants</code> with a new unique slug</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">201</code>; tenant row, R2 key prefix, and RLS run-as role are created atomically</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> the slug is already taken</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">409</code>; no partial tenant is created</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-17</span>
+            <span class="font-semibold text-sm">Super admin reads across every tenant without membership</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">GET /admin/tenants</code>, then <code class="font-mono text-xs">GET /admin/posts?tenant=beta</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> all tenants and cross-tenant rows are returned (RLS bypass), including drafts, with no <code class="font-mono text-xs">memberships</code> row required</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-18</span>
+            <span class="font-semibold text-sm">Super admin switches active scope and acts</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">PUT /auth/me/active-tenant</code> with a tenant id from the platform list</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> subsequent admin calls operate in that tenant scope (create, edit, publish any post) — same session, no re-login</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-3">
+      <div class="collapse-title text-base font-semibold">Cross-cutting — auth, sessions, performance</div>
+      <div class="collapse-content">
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-19</span>
+            <span class="font-semibold text-sm">First SSO sign-in links account + memberships</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> a verified Google/GitHub identity and a pending invitation for the same email</li>
+            <li class="text-sm text-base-content/70"><strong>When</strong> the OAuth callback completes</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> the user + <code class="font-mono text-xs">identities</code> row are upserted, the invitation is consumed, a session is issued, and repeating the flow never duplicates rows</li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-20</span>
+            <span class="font-semibold text-sm">User with several memberships switches active tenant</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">PUT /auth/me/active-tenant</code> with one of their member tenants</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> <code class="font-mono text-xs">200</code>; every later admin call in that session is RLS-scoped to that tenant; selecting a tenant they don't belong to → <code class="font-mono text-xs">403</code></li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-21</span>
+            <span class="font-semibold text-sm">Logout revokes the session</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>When</strong> <code class="font-mono text-xs">POST /auth/logout</code></li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> the session row is deleted; any reuse of that token yields <code class="font-mono text-xs">401</code></li>
+          </ul>
+        </div>
+        <div class="border border-base-content/10 rounded-box p-4 bg-base-100 mt-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm badge-soft badge-neutral font-mono">ST-22</span>
+            <span class="font-semibold text-sm">Published post reads are fast at scale</span>
+          </div>
+          <ul class="list-disc pl-5 mt-2 space-y-1">
+            <li class="text-sm text-base-content/70"><strong>Given</strong> sustained load on the public read path</li>
+            <li class="text-sm text-base-content/70"><strong>Then</strong> p95 &lt; 150&nbsp;ms at ≥ 5k reads/s, with most responses served from CDN / server cache without a DB hit (details in section 10)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 3 ARCHITECTURE ============ -->
+  <section id="arch" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">3</span>
+      <h2 class="text-2xl font-bold">System architecture</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      One backend — a modular monolith, framework- and language-agnostic — hosts authentication and content in the same
+      deployable: auth, posts, media, and tenancy are modules in one process, sharing one database and one deploy surface.
+      The posts module also owns document import (PDF · DOCX · Google Docs · open formats → markdown) as a worker job.
+      The API edge authenticates, resolves the tenant, and dispatches to those modules. Everything stateful lives in
+      PostgreSQL with RLS; image bytes live only in R2. Google and GitHub are the only external pieces, and only for the
+      SSO handshake.
+    </p>
+    <pre class="mermaid">
+flowchart TB
+    subgraph Readers["Public reader UIs — one per site"]
+        RA["Site A · tenant alpha"]
+        RB["Site B · tenant beta"]
+        RC["Site C · tenant gamma"]
+    end
+    E["Admin & editor UI"]
+    subgraph B["Backend — one deployable, one process"]
+        GW["API edge — REST · auth · tenant resolution"]
+        SA["Auth module — password + SSO"]
+        SP["Posts module — markdown · lifecycle · import"]
+        SM["Media module — presigned uploads"]
+        ST["Tenancy module — members · roles"]
+    end
+    DB[("PostgreSQL — shared schema + RLS")]
+    R2[["Cloudflare R2 — image objects + CDN"]]
+    G["Google OAuth 2.0 / OIDC"]
+    GH["GitHub OAuth"]
+    RA --> GW
+    RB --> GW
+    RC --> GW
+    E --> GW
+    GW --> SA
+    GW --> SP
+    GW --> SM
+    GW --> ST
+    SA --> G
+    SA --> GH
+    SA --> DB
+    SP --> DB
+    SM --> R2
+    ST --> DB
+    E -. markdown embeds image URLs .-> R2
+    RA -. render image URLs .-> R2
+    RB -. render image URLs .-> R2
+    RC -. render image URLs .-> R2
+    </pre>
+    <div class="grid md:grid-cols-3 gap-4 mt-2">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Why one DB</h3>
+          <p class="text-sm text-base-content/70">A single shared database keeps cross-tenant admin/superuser queries, analytics, and migrations simple. Isolation is enforced <strong>inside the database</strong> via RLS, so a bug in app code cannot leak rows across tenants. Auth and posts share transaction boundaries — e.g. "sign up → provision membership" commits atomically.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Why R2, not DB blobs</h3>
+          <p class="text-sm text-base-content/70">Decision adopted: R2 keeps the DB small (image metadata only), gives no-egress-fee delivery with Cloudflare's CDN, and uploads stream through presigned URLs without touching the API's memory. Key scheme below.</p>
+        </div>
+      </div>
+      <div class="card card-border border-primary/50 bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Auth ships in the backend</h3>
+          <p class="text-sm text-base-content/70">Authentication is a module of the <strong>same backend as posts</strong> — one process, one DB, one deployment. No third-party identity service: sessions are validated against Postgres on every request. Only the SSO handshake talks to Google/GitHub.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4 TENANCY ============ -->
+  <section id="tenancy" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">4</span>
+      <h2 class="text-2xl font-bold">Multi-tenancy model</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Tenants are resolved from the <strong>subdomain or request header</strong> for public reads, and from the
+      <strong>authenticated session's active tenant</strong> for admin writes. Data separation is database-enforced.
+    </p>
+
+    <div class="grid md:grid-cols-3 gap-4 mt-5">
+      <div class="card card-border border-primary/60 bg-base-200">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <h3 class="card-title text-base">Shared schema + RLS</h3>
+            <span class="badge badge-primary">Adopted</span>
+          </div>
+          <p class="text-sm text-base-content/70">Every row carries <code class="badge badge-soft badge-ghost font-mono">tenant_id</code>. Postgres policies auto-append <code class="font-mono text-xs">WHERE tenant_id = current_tenant()</code>.</p>
+          <ul class="text-xs list-disc pl-4 text-base-content/60 mt-2">
+            <li>One migration path, trivial cross-tenant admin</li>
+            <li>Superuser role bypasses policies — exactly the "see all tenants" case</li>
+            <li>Set session tenant via <code class="font-mono">SET LOCAL app.tenant_id</code></li>
+            <li>Best fit: hundreds to low-thousands of tenant sites</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Schema-per-tenant</h3>
+          <p class="text-sm text-base-content/70">Each tenant gets a schema (<code class="font-mono">alpha.posts</code>, …).</p>
+          <ul class="text-xs list-disc pl-4 text-base-content/60 mt-2">
+            <li>Hard isolation, per-tenant backup/restore</li>
+            <li>Migrations × N; cross-tenant queries painful</li>
+            <li>Superuser view needs cross-schema queries/views</li>
+            <li>Only pays off with strict regulatory isolation</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Database-per-tenant</h3>
+          <p class="text-sm text-base-content/70">Separate logical database per tenant.</p>
+          <ul class="text-xs list-disc pl-4 text-base-content/60 mt-2">
+            <li>Strongest blast-radius isolation</li>
+            <li>Highest ops cost: provisioning, pooling, migrations</li>
+            <li>Superuser = routing layer across N pools</li>
+            <li>Reserved for enterprise/isolated customers</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-6">
+      <h3 class="text-lg font-semibold">Superuser visibility</h3>
+      <p class="text-sm text-base-content/70 max-w-3xl mt-1">
+        The platform role <code class="badge badge-soft badge-warning font-mono">super_admin</code> grants a session a
+        "global tenant" scope, bypassing RLS policies (implemented via a security definer or policy owner). All other
+        sessions are permanently RLS-scoped to one tenant, even privileged tenant admins.
+      </p>
+    </div>
+
+    <pre class="mermaid">
+flowchart TD
+    Q["HTTP request"] --> A["Resolve tenant\nslug or session tenant"]
+    A --> B{"Has session?"}
+    B -->|no| P["Public read only\nRLS scope = tenant · published rows"]
+    B -->|yes| C["Resolve user + memberships"]
+    C --> D["DB enforces RLS by membership role\ncannot be bypassed by app code"]
+    D --> E{"User is super_admin?"}
+    E -->|no| F["Rows scoped to active tenant"]
+    E -->|yes| G["Bypass RLS · cross-tenant access"]
+    F --> H["RBAC authorizes the action\n(view · edit · publish · manage)"]
+    G --> H
+    </pre>
+  </section>
+
+  <!-- ============ 5 AUTHORIZATION ============ -->
+  <section id="authz" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">5</span>
+      <h2 class="text-2xl font-bold">Authorization model</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Two layers: <strong>RLS</strong> decides <em>which rows</em> you may see, <strong>RBAC</strong> decides
+      <em>which actions</em> you may take. Both scopes derive from the same membership table. The
+      <strong>post is the authorization object</strong> — every post is created in a tenant with an author, and
+      per-role capability is evaluated against the post's tenant + status.
+    </p>
+
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-5">
+      <table class="table table-sm">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>Guest</th>
+            <th>Author</th>
+            <th>Editor</th>
+            <th>Admin</th>
+            <th>Owner</th>
+            <th>Super admin</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="font-semibold">Read published posts (any reader UI)</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔ (all tenants)</td></tr>
+          <tr><td class="font-semibold">Create drafts</td><td>–</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔ (any tenant)</td></tr>
+          <tr><td class="font-semibold">Edit own drafts</td><td>–</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+          <tr><td class="font-semibold">Edit any post in tenant</td><td>–</td><td>–</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+          <tr><td class="font-semibold">View drafts</td><td>–</td><td>own</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+          <tr><td class="font-semibold">Publish / unpublish</td><td>–</td><td>–</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td></tr>
+          <tr><td class="font-semibold">Manage members &amp; roles</td><td>–</td><td>–</td><td>–</td><td>✔</td><td>✔</td><td>✔ (global)</td></tr>
+          <tr><td class="font-semibold">Manage tenant settings</td><td>–</td><td>–</td><td>–</td><td>✔</td><td>✔</td><td>✔</td></tr>
+          <tr><td class="font-semibold">Delete tenant / posts</td><td>–</td><td>–</td><td>–</td><td>–</td><td>✔</td><td>✔</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-base-content/50 mt-2">Row access is enforced by RLS; cell-level actions by a middleware role check in the service layer. Never the reverse.</p>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-5">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Post lifecycle &amp; rules</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li><code class="font-mono text-xs">draft</code> → only author/editor/admin/super_admin can read</li>
+            <li><code class="font-mono text-xs">published</code> → guest-readable via public API</li>
+            <li><code class="font-mono text-xs">archived</code> → hidden from public listing, still editable by editor+</li>
+            <li>Longevity rules (scheduling, unpublish-on-date) live as job handlers, not in the schema</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Membership keys these tables</h3>
+          <p class="text-sm text-base-content/70">
+            Actor = <code class="font-mono text-xs">memberships(tenant_id, user_id, role)</code>.
+            Authorization is a single query: check membership role against the post's tenant, compare against the
+            permission matrix. Super_admin short-circuits before RLS applies.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 6 AUTHENTICATION ============ -->
+  <section id="authn" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">6</span>
+      <h2 class="text-2xl font-bold">Authentication &amp; SSO</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Authentication is a module of the <strong>same backend that serves posts</strong> — one process, one database, one
+      deployment. It is not a separate identity service: sessions are validated against Postgres on every request, and a
+      single transaction can create a user, provision a membership, and issue a session atomically. Google and GitHub are
+      the only external parties in the auth path, and only for the SSO handshake.
+    </p>
+
+    <div class="grid lg:grid-cols-2 gap-4 mt-5">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Password sign-in (optional)</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1 mt-2">
+            <li><code class="font-mono text-xs">POST /auth/signup</code>, <code class="font-mono text-xs">POST /auth/login</code></li>
+            <li>Argon2id hashing (or bcrypt); never store plaintext</li>
+            <li>Rate-limited, lockout after N failures on the login endpoint</li>
+            <li>Issues the same session token as SSO — one token model, no special-casing</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Google &amp; GitHub SSO</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1 mt-2">
+            <li>Authorization Code + PKCE on both; <code class="font-mono text-xs">state</code> binds the callback to the start</li>
+            <li>Google via OIDC subject; GitHub via app user id — persisted in <code class="font-mono text-xs">identities</code></li>
+            <li>First sign-in → create user, link identity, consume invitation/auto-member via verified email</li>
+            <li>Subsequent sign-ins → idempotent upsert, map to existing memberships</li>
+            <li>Emails are normalized (lowercase, trimmed) before any matching</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">Token strategy — opaque DB sessions</h3>
+    <div class="grid md:grid-cols-2 gap-4 mt-3">
+      <div class="card card-border border-primary/50 bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Opaque sessions in DB (adopted)</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Random token hashed into <code class="font-mono text-xs">sessions</code>; instant revoke (logout / role change / breach)</li>
+            <li>Resolves actor's active tenant at request time — membership edits take effect immediately</li>
+            <li>Sent as HttpOnly + Secure cookie (SameSite=Lax) with CSRF protection, or Authorization header for native/admin clients</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Stateless JWT (rejected here)</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>No per-token revocation; carries tenant/role claims that go stale</li>
+            <li>Role or tenant membership changes require re-issuance, and orphaned tokens stay valid until expiry</li>
+            <li>Fine when auth is external and tenant scope is static — not our case</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">OAuth flow (Google / GitHub)</h3>
+    <pre class="mermaid">
+sequenceDiagram
+    actor U as Editor
+    participant UI as Admin UI
+    participant API as API
+    participant IDP as IdP (Google/GitHub)
+    participant DB as PostgreSQL
+    U->>UI: "Sign in with GitHub"
+    UI->>API: GET /auth/oauth/start?provider=github
+    API->>DB: persist nonce + PKCE verifier (single use)
+    API-->>UI: redirect_uri + client_id + code_challenge + state
+    UI->>IDP: redirect (authorization request)
+    IDP-->>UI: callback ?code&state
+    UI->>API: POST /auth/oauth/callback (code, state)
+    API->>DB: consume nonce, verify state
+    API->>IDP: exchange code + PKCE verifier
+    IDP-->>API: id_token + email + verified
+    API->>DB: upsert user + identity
+    API->>DB: map membership or consume invitation
+    API->>DB: create session row
+    API-->>UI: set session cookie / return token
+    UI->>U: signed in as editor (tenant scope resolved)
+    </pre>
+  </section>
+
+  <!-- ============ 7 DATA MODEL ============ -->
+  <section id="data" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">7</span>
+      <h2 class="text-2xl font-bold">Data model</h2>
+    </div>
+    <pre class="mermaid">
+erDiagram
+    TENANT ||--o{ POST : "owns"
+    TENANT ||--o{ MEMBERSHIP : "has"
+    TENANT ||--o{ INVITATION : "sends"
+    TENANT ||--o{ IMPORT : "owns"
+    USER ||--o{ MEMBERSHIP : "holds"
+    USER ||--o{ IDENTITY : "links"
+    USER ||--o{ SESSION : "issues"
+    USER ||--o{ POST : "authors"
+    USER ||--o{ IMPORT : "requests"
+    POST ||--o| IMPORT : "produces"
+    POST ||--o{ POST_IMAGE : "contains"
+    TENANT ||--o{ POST_IMAGE : "owns"
+    TENANT {
+        uuid id PK
+        text slug UK
+        text name
+        jsonb settings
+        timestamptz created_at
+    }
+    USER {
+        uuid id PK
+        text email UK
+        text password_hash
+        text display_name
+        text avatar_url
+        timestamptz created_at
+    }
+    MEMBERSHIP {
+        uuid tenant_id FK
+        uuid user_id FK
+        text role "owner admin editor author"
+        unique(tenant_id user_id)
+    }
+    IDENTITY {
+        uuid user_id FK
+        text provider "google github"
+        text subject
+        unique(provider subject)
+    }
+    POST {
+        uuid id PK
+        uuid tenant_id FK
+        uuid author_id FK
+        text slug
+        text title
+        text excerpt
+        text content_markdown
+        text status "draft published archived"
+        timestamptz published_at
+        jsonb metadata
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    POST_IMAGE {
+        uuid id PK
+        uuid tenant_id FK
+        uuid post_id FK
+        text r2_key
+        text url
+        integer width
+        integer height
+        integer size_bytes
+        text mime_type
+        integer position
+        jsonb variants "resize + webp sets"
+        timestamptz created_at
+    }
+    SESSION {
+        uuid id PK
+        uuid user_id FK
+        timestamptz expires_at
+        timestamptz created_at
+    }
+    INVITATION {
+        uuid tenant_id FK
+        text email
+        text role
+        text token_hash
+        timestamptz expires_at
+    }
+    IMPORT {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        uuid post_id "nullable — set on apply"
+        text source_format "pdf docx odt rtf html gdoc"
+        text source_key "R2 object of original"
+        text status "converting done error"
+        text markdown_out "converted body"
+        text error
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    </pre>
+
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200">
+      <table class="table table-sm">
+        <thead><tr><th>Entity</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs font-semibold">tenants</td><td class="text-xs text-base-content/70">slug is the public identity (subdomain / read-API path). settings absorbs nav, SEO, theme per site.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">users</td><td class="text-xs text-base-content/70">Platform-wide identity. password_hash nullable (SSO-only users). email is unique &amp; normalized.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">memberships</td><td class="text-xs text-base-content/70">The join of actor→tenant→role. The single source of truth for RBAC; a user has one row per tenant they belong to.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">identities</td><td class="text-xs text-base-content/70">Provider + subject links (Google OIDC sub, GitHub user id). Enables account takeover-safe re-auth.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">posts</td><td class="text-xs text-base-content/70">The authorization object. content_markdown is the canonical body (rendered as GitHub-Flavored Markdown with server-side syntax highlighting on reader sites); slug unique per tenant; metadata JSONB for tags/SEO hab per site.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">post_images</td><td class="text-xs text-base-content/70">One row per image referenced by a post. r2_key is the object path; DB holds only metadata — bytes live in R2. variants stores the generated resize/WebP object sets (480/800/1200).</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">sessions</td><td class="text-xs text-base-content/70">Hashed token, expiry. Revocation point for logout and membership changes.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">invitations</td><td class="text-xs text-base-content/70">Pre-provisions a membership either targeted at an email (consumed on first verified SSO sign-in) or via a role-baked tenant invite link.</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">imports</td><td class="text-xs text-base-content/70">Document import jobs. Holds the original file key in R2, conversion status, the converted markdown, and the draft post it produced (nullable until apply). Originals are 404 after the post is published or applies.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 8 API ============ -->
+  <section id="api" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">8</span>
+      <h2 class="text-2xl font-bold">API surface</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Three families. Public endpoints are <strong>read-only, cachable</strong> and keyed by <code class="font-mono text-xs">:tenantSlug</code>.
+      Admin endpoints are tenant-scoped off the session. Platform endpoints exist only for <code class="font-mono text-xs">super_admin</code>.
+    </p>
+
+    <h3 class="text-lg font-semibold mt-5">Public read API <span class="badge badge-soft badge-info badge-sm">no auth · cache-friendly</span></h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-2">
+      <table class="table table-sm">
+        <thead><tr><th>Method · Path</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs whitespace-nowrap">GET /public/:tenantSlug/posts</td><td class="text-xs text-base-content/70">Paginated published posts (metadata, no body) — CDN cacheable via <code class="font-mono text-xs">etag</code>/<code class="font-mono text-xs">immutable</code> tags.</td></tr>
+          <tr><td class="font-mono text-xs whitespace-nowrap">GET /public/:tenantSlug/posts/:slug</td><td class="text-xs text-base-content/70">Single published post: title, excerpt, HTML render of markdown, author, published_at, images.</td></tr>
+          <tr><td class="font-mono text-xs whitespace-nowrap">GET /public/:tenantSlug/posts?tag=…&amp;before=…</td><td class="text-xs text-base-content/70">Optional filters: tag from metadata, cursor pagination, date.</td></tr>
+          <tr><td class="font-mono text-xs whitespace-nowrap">GET /public/:tenantSlug/site</td><td class="text-xs text-base-content/70">Tenant settings for reader UIs (nav, branding, SEO defaults).</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">Admin API <span class="badge badge-soft badge-secondary badge-sm">session auth · tenant-scoped</span></h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-2">
+      <table class="table table-sm">
+        <thead><tr><th>Method · Path</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs">POST /auth/signup · /auth/login · /auth/oauth/start · /auth/logout</td><td class="text-xs text-base-content/70">Authentication entry points (OAuth callback is a redirect endpoint).</td></tr>
+          <tr><td class="font-mono text-xs">GET /auth/me</td><td class="text-xs text-base-content/70">Actor, active tenant, roles, cross-tenant flag.</td></tr>
+          <tr><td class="font-mono text-xs">GET|POST /admin/posts</td><td class="text-xs text-base-content/70">List (filters: status, author) / create draft.</td></tr>
+          <tr><td class="font-mono text-xs">GET|PATCH|DELETE /admin/posts/:id</td><td class="text-xs text-base-content/70">Fetch, edit (markdown + metadata), delete — author/editor+ per matrix.</td></tr>
+          <tr><td class="font-mono text-xs">POST /admin/posts/:id/publish · /unpublish</td><td class="text-xs text-base-content/70">Status transitions guarded by the editor+ role; sets published_at.</td></tr>
+          <tr><td class="font-mono text-xs">POST /admin/media/presign</td><td class="text-xs text-base-content/70">Returns a short-lived presigned PUT URL for R2 (tenant-prefixed key).</td></tr>
+          <tr><td class="font-mono text-xs">POST /admin/media/confirm</td><td class="text-xs text-base-content/70">Records the image metadata row after successful upload; ties to post.</td></tr>
+          <tr><td class="font-mono text-xs">DELETE /admin/media/:id</td><td class="text-xs text-base-content/70">Deletes object + metadata row (editor+).</td></tr>
+          <tr><td class="font-mono text-xs">POST /admin/imports</td><td class="text-xs text-base-content/70">Start a document import (multipart file or <code class="font-mono text-xs">google_docs</code> source) → <code class="font-mono text-xs">202</code>; conversion runs as a worker job.</td></tr>
+          <tr><td class="font-mono text-xs">GET /admin/imports/:id</td><td class="text-xs text-base-content/70">Conversion status, markdown preview, per-format fidelity warning, or error + remediation hint.</td></tr>
+          <tr><td class="font-mono text-xs">POST /admin/imports/:id/apply</td><td class="text-xs text-base-content/70">Create a draft post from the converted body (author+, ST-23 rules).</td></tr>
+          <tr><td class="font-mono text-xs">GET|POST /admin/members</td><td class="text-xs text-base-content/70">List members, invite by email (admin+).</td></tr>
+          <tr><td class="font-mono text-xs">PATCH|DELETE /admin/members/:userId</td><td class="text-xs text-base-content/70">Role change / removal (admin+).</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">Platform API <span class="badge badge-soft badge-warning badge-sm">super_admin only</span></h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-2">
+      <table class="table table-sm">
+        <thead><tr><th>Method · Path</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs">GET|POST /admin/tenants</td><td class="text-xs text-base-content/70">Provision + list all tenant sites.</td></tr>
+          <tr><td class="font-mono text-xs">GET /admin/tenants/:id</td><td class="text-xs text-base-content/70">Cross-tenant drill-down (posts, members, usage).</td></tr>
+          <tr><td class="font-mono text-xs">PATCH /admin/tenants/:id</td><td class="text-xs text-base-content/70">Settings; set tenant super_admin grants.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 9 IMAGES ============ -->
+  <section id="images" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">9</span>
+      <h2 class="text-2xl font-bold">Content pipeline — images (R2) + document import</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Decision adopted: <strong>R2, not DB blobs</strong>. DB keeps metadata only. One shared bucket with per-tenant key
+      prefixes gives data separation at the object level; a custom domain on Cloudflare CDN serves bytes with no egress fees.
+    </p>
+
+    <h3 class="text-lg font-semibold mt-5">Object layout</h3>
+    <div class="mockup-code mt-2 text-sm">
+      <pre data-prefix="alpha/">media.example.com/</pre>
+      <pre data-prefix="">posts/fc8a12ab/01hz9a-cover.webp</pre>
+      <pre data-prefix="">posts/fc8a12ab/01hz9a-cover-480.webp</pre>
+      <pre data-prefix="">posts/fc8a12ab/01hz9a-cover-1200.webp</pre>
+      <pre data-prefix="">posts/fc8a12ab/01hz9b-body.jpg</pre>
+      <pre data-prefix="beta/">media.example.com/</pre>
+      <pre data-prefix="">posts/77d0c30e/01hz1k-covershoot.jpg</pre>
+    </div>
+    <p class="text-xs text-base-content/50 mt-2">
+      Keys embed tenant + post + UUID so a compromised presign URL can never address another tenant's object.
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+    A["Editor uploads image"] --> B["POST /admin/media/presign"]
+    B -->|"returns presigned PUT URL\n(R2 S3-compatible API)"| C["Editor PUTs bytes directly to R2"]
+    C --> D[("R2 bucket\nkeys under tenant prefix")]
+    B --> E["POST /admin/media/confirm"]
+    E --> W["Variant worker\nresize 480/800/1200 + WebP"]
+    W --> D
+    W --> F
+    F[("post_images — metadata + variants")]
+    D --> G["Custom domain + CDN cache"]
+    G --> H["Markdown references CDN URL · srcset from variants"]
+    H --> I["Reader UIs render images via CDN"]
+    </pre>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-2">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Upload security</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Presigned URLs: short TTL (15 min), scoped to exact key</li>
+            <li>MIME + max-size validation server-side at confirm</li>
+            <li>Confirm creates the row and enqueues resize/WebP variant jobs (retried by the worker)</li>
+            <li>Orphan objects cleaned by a sweeper job</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Delivery</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Served read-only from CDN; no API round trip per image</li>
+            <li>Variants generated at upload/confirm time by a worker (resize 480/800/1200 + WebP); sizes live in <code class="font-mono text-xs">post_images.variants</code></li>
+            <li>Reader UIs build responsive <code class="font-mono text-xs">srcset</code> from the variant list; caching via long-lived content-hashed URLs</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-8">Document import — PDF · DOCX · Google Docs · open formats</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl mt-1">
+      Authors bring in an existing document and land in the editor as a <strong>markdown draft</strong>, not raw pasted
+      text. Conversion is async (same worker path as image variants) and <strong>never writes a partial post</strong>;
+      a finished conversion is previewed, then applied as a draft under the normal ST-5 rules (ST-23). Google Docs
+      reuses the author's linked Google identity to export the document — no new sign-in, but the
+      <code class="font-mono text-xs">drive.readonly</code> export scope must be consented at login.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-3">
+      <table class="table table-sm">
+        <thead><tr><th>Source</th><th>Approach</th><th>Fidelity</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs font-semibold">DOCX</td><td class="text-xs text-base-content/70">docx → HTML → markdown (pandoc family); styles map to GFM semantics (headings, code, links, lists).</td><td class="text-xs">High — round-trips to a clean draft</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">Google Docs</td><td class="text-xs text-base-content/70">Export via the author's Google identity → docx/HTML, then the DOCX path; embedded images are carried over.</td><td class="text-xs">High</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">ODT · RTF · HTML · MD</td><td class="text-xs text-base-content/70">Open-format converters (pandoc family); plain text detected and passed through untouched.</td><td class="text-xs">High</td></tr>
+          <tr><td class="font-mono text-xs font-semibold">PDF</td><td class="text-xs text-base-content/70">Text-layer extraction + layout heuristics; scanned / no-text PDFs warn and hand back to manual authoring.</td><td class="text-xs">Medium — headings/tables can be lossy; surfaced as a fidelity warning</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-base-content/50 mt-2">
+      The conversion backend is a job the posts module owns (same worker pool as variants). Output goes through the exact
+      sanitization and rendering pipeline as hand-written markdown, so an imported document can never smuggle raw HTML
+      into a reader page.
+    </p>
+
+    <pre class="mermaid">
+flowchart LR
+    A["Author uploads file\nor picks a Google Doc"] --> B["POST /admin/imports → 202"]
+    B --> C["Import worker\nconvert → markdown"]
+    C --> D["Markdown preview\nGET /admin/imports/:id"]
+    D --> E["Author reviews\n+ edits"]
+    E --> F["POST /admin/imports/:id/apply"]
+    F --> G["Draft created\nST-5 rules · ST-23"]
+    C -->|"error"| H["Error + remediation hint\nno partial post"]
+    </pre>
+  </section>
+
+  <!-- ============ 10 PERFORMANCE ============ -->
+  <section id="perf" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">10</span>
+      <h2 class="text-2xl font-bold">Performance &amp; horizontal scalability</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      The API is horizontally scalable because <strong>compute is stateless</strong>: every request-scoped artifact
+      (session token, PKCE verifier, OAuth nonce, active tenant scope) is written to shared Postgres, so any replica can
+      serve any request — no sticky sessions, no in-process locks, no shared local state. Adding capacity is just
+      adding replicas behind the load balancer. Auth is a module of this same stateless backend (section 3), so identity
+      traffic scales on the same replicas as post traffic.
+    </p>
+
+    <h3 class="text-lg font-semibold mt-4">Request path under load</h3>
+    <pre class="mermaid">
+flowchart LR
+    C["Cloudflare edge\nCDN cache — public API + media"] --> LB["Load balancer"]
+    LB --> R1["API replica 1 · stateless"]
+    LB --> R2["API replica 2 · stateless"]
+    LB --> RN["API replica N · stateless"]
+    R1 --> BAR["PgBouncer\nconnection pool"]
+    R2 --> BAR
+    RN --> BAR
+    BAR --> PR["Primary PostgreSQL\nwrites + RLS"]
+    BAR --> RO["Read replicas\npublic read path"]
+    RN --> MED[["R2 media objects"]]
+    </pre>
+
+    <div class="stats stats-vertical lg:stats-horizontal shadow mt-6 w-full">
+      <div class="stat">
+        <div class="stat-title">Public read p95</div>
+        <div class="stat-value text-2xl">&lt;150ms</div>
+        <div class="stat-desc">at ≥ 5k reads/s — ST-22</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Publish (write) p95</div>
+        <div class="stat-value text-2xl">&lt;250ms</div>
+        <div class="stat-desc">post + purge enqueue</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Scale-out</div>
+        <div class="stat-value text-2xl">Replicas</div>
+        <div class="stat-desc">add pods, zero config</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Media egress cost</div>
+        <div class="stat-value text-2xl">$0</div>
+        <div class="stat-desc">R2 origin + Cloudflare CDN</div>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-4 mt-6">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Reads mostly leave the API</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Public list/single-post + all media cached at the Cloudflare edge; reader sites revalidate via ISR</li>
+            <li>Publish/unpublish purges <em>only the affected tenant's</em> keys (a generation tag per tenant)</li>
+            <li>A repeat reader rarely touches a DB connection</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">DB ceiling managed</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>PgBouncer pools the connection fan-in from N replicas</li>
+            <li>Read replicas absorb the public read path; writes (rare) go to the primary, where RLS lives</li>
+            <li>Image bytes live in R2, never in the DB — small working set, cacheable indexes</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Background work stays off-path</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Cache purge, media sweeper, replica warm-up, and document import run as retried worker jobs</li>
+            <li>API never blocks on them; a failed purge retries and self-heals</li>
+            <li>Rate limiting per tenant + global on auth &amp; mutation endpoints for load safety</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">Index &amp; query discipline</h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-2">
+      <table class="table table-sm">
+        <thead><tr><th>Concern</th><th>Approach</th></tr></thead>
+        <tbody>
+          <tr><td class="text-sm font-semibold">Hot-path indexes</td><td class="text-sm text-base-content/70"><code class="font-mono text-xs">posts (tenant_id, status, published_at DESC)</code>; <code class="font-mono text-xs">UNIQUE (tenant_id, slug)</code>; <code class="font-mono text-xs">post_images (post_id)</code>; <code class="font-mono text-xs">memberships UNIQUE (tenant_id, user_id)</code>; <code class="font-mono text-xs">identities UNIQUE (provider, subject)</code>; <code class="font-mono text-xs">sessions (user_id), (expires_at)</code></td></tr>
+          <tr><td class="text-sm font-semibold">Projection</td><td class="text-sm text-base-content/70">List responses never include the markdown body or rendered HTML; body fetched by id only</td></tr>
+          <tr><td class="text-sm font-semibold">No N+1</td><td class="text-sm text-base-content/70">Author + image set resolved in one or two queries per page; no per-post queries inside loops</td></tr>
+          <tr><td class="text-sm font-semibold">Pagination</td><td class="text-sm text-base-content/70">Keyset/cursor only; no <code class="font-mono text-xs">OFFSET</code> scans on hot paths</td></tr>
+          <tr><td class="text-sm font-semibold">Tenant fan-in</td><td class="text-sm text-base-content/70">Super_admin queries use an explicit tenant param and the tenant index — never full-table scans</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-6">Consistency at the edges</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl mt-1">
+      Publish writes to the <strong>primary</strong>, then enqueues purge + replica sync. Because a public read can arrive
+      microseconds later, single-post public reads hit the primary or a warm cache until the purge completes; list reads
+      tolerate ≤ ~1s replica lag. Net effect (ST-9/ST-10): a reader never sees a just-published post vanish, nor an
+      unpublished post linger, for more than one purge cycle.
+    </p>
+  </section>
+
+  <!-- ============ 11 UIs ============ -->
+  <section id="uis" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">11</span>
+      <h2 class="text-2xl font-bold">UI strategy</h2>
+    </div>
+    <div class="grid md:grid-cols-2 gap-4 mt-5">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Admin &amp; editor client</h3>
+          <p class="text-sm text-base-content/70">One SPA (any stack) used by authors, editors, admins, and superadmins; role-aware rendering of the permission matrix.</p>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 mt-2 space-y-1">
+            <li>Session switcher for superadmins (global tenant scope)</li>
+            <li>Interactive markdown editor: rendered preview updates on each keystroke, and clicking a rendered block drops you back into its markdown source for editing — details below</li>
+            <li>Image dropzone → presign/confirm, document import upload, OAuth buttons (Google/GitHub) + password form on the same screen</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Reader sites (multiple)</h3>
+          <p class="text-sm text-base-content/70">Independent UIs, each bound to one tenant slug in deploy-time config. SSR renders markdown HTML from the public API.</p>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 mt-2 space-y-1">
+            <li>Revalidate/ISR so CDN connects published posts as fast as possible</li>
+            <li>Rendering: server-side GFM → sanitized HTML with syntax highlighting (never client-render raw markdown)</li>
+            <li>Images use responsive <code class="font-mono text-xs">srcset</code> from <code class="font-mono text-xs">post_images.variants</code></li>
+            <li>A reader site never touches the admin API or any credential</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="text-lg font-semibold mt-8">Interactive markdown editor — draft authoring (adopted)</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl mt-1">
+      The editor client is a bidirectional markdown editor: editors write in markdown, see the rendered post update
+      <strong>on every keystroke</strong>, and can click any rendered piece to drop back into its markdown source and
+      edit it in place. It is the authoring surface for ST-5 / ST-6 / ST-9 / ST-11 and the import review step (ST-23).
+    </p>
+    <ul class="text-sm text-base-content/70 list-disc pl-5 mt-3 space-y-1">
+      <li><strong>Live preview parity.</strong> Each change re-renders the preview (≈150&nbsp;ms debounce) with the <em>same</em> GFM renderer spec as readers — same sanitization and highlighting theme. It renders the active draft only; the HTML guests read is still produced at publish time (render-on-publish). Golden tests lock the preview output to published output so the two can never drift.</li>
+      <li><strong>Click-through editing.</strong> The renderer emits per-block source metadata (each rendered block ↔ its markdown start/end offsets). Clicking a rendered heading, paragraph, quote, code block, or image toggles that block back into an inline markdown editor scoped to exactly its source range; editing re-renders just that block and the cursor stays put.</li>
+      <li><strong>Inline image flow.</strong> An image in the preview — or a toolbar button — opens the dropzone → <code class="font-mono text-xs">POST /admin/media/presign</code> → PUT to R2 → <code class="font-mono text-xs">confirm</code> → the <code class="font-mono text-xs">![alt](cdnUrl)</code> markdown is inserted at the cursor.</li>
+      <li><strong>Metadata + autosave.</strong> Slug, excerpt, tags, and cover image live in a side panel; edits autosave (debounced <code class="font-mono text-xs">PATCH /admin/posts/:id</code>) with a saved indicator. Only the author's own drafts open per ST-6.</li>
+    </ul>
+
+    <pre class="mermaid">
+flowchart LR
+    A["Markdown source\nblocks carry (start, end) offsets"] -->|"render — same spec as publish"| B["Rendered preview\nheading · paragraph · quote · code · image"]
+    B -->|"click a block"| C["Block toggles back to its\nmarkdown source range, inline"]
+    C -->|"edit · ~150 ms debounce"| B
+    B -->|"content changed → autosave"| D["PATCH /admin/posts/:id\ndraft · author-only"]
+    </pre>
+    <p class="text-xs text-base-content/50 mt-2">
+      The block↔range mapping is part of the shared renderer contract — the same source offsets feed the import preview
+      diff (ST-23), so "review before apply" shows exactly what an editor will see and edit.
+    </p>
+  </section>
+
+  <!-- ============ 12 RISKS ============ -->
+  <section id="risks" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">12</span>
+      <h2 class="text-2xl font-bold">Risks &amp; remaining decisions</h2>
+    </div>
+
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm">
+        <thead><tr><th>Risk / question</th><th>Mitigation / default</th><th>Decision owner</th></tr></thead>
+        <tbody>
+          <tr><td class="text-sm">RLS misconfig silently leaks rows</td><td class="text-sm text-base-content/70">Enforced <code class="font-mono text-xs">ENABLE</code> + <code class="font-mono text-xs">FORCE</code>, fail-closed tenant scoping via <code class="font-mono text-xs">app.tenant_id</code>, <code class="font-mono text-xs">WITH CHECK</code> on writes, explicit <code class="font-mono text-xs">BYPASSRLS</code> for super_admin, and "can't see other tenant" contract tests — checklist below.</td><td><span class="badge badge-soft badge-info">Fixing</span></td></tr>
+          <tr><td class="text-sm">OAuth callback CSRF (login CSRF)</td><td class="text-sm text-base-content/70">Nonce (state) is single-use and bound to the session; PKCE ties code to verifier; verify email_verified.</td><td>Build</td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Auth split into a separate service?</td><td class="text-sm text-base-content/70">Resolved: auth is a module of the same backend as posts (section 3) — one process, one DB, one deploy; only Google/GitHub act as external IdPs, and only for the SSO handshake.</td><td><span class="badge badge-soft badge-success">Resolved</span></td></tr>
+          <tr><td class="text-sm">Markdown rendering XSS on reader UIs</td><td class="text-sm text-base-content/70">Render sanitized HTML server-side; allow-list inline images/CDN URLs only; no raw HTML passthrough without CSP.</td><td>Build</td></tr>
+          <tr><td class="text-sm">Editor preview drifts from published HTML</td><td class="text-sm text-base-content/70">Preview renders the active draft with the same GFM / sanitize / highlight spec that publish uses (guests still get render-on-publish HTML); golden tests pin preview output to published output.</td><td>Build</td></tr>
+          <tr><td class="text-sm">Orphaned R2 objects / billing bloat</td><td class="text-sm text-base-content/70">Sweeper compares R2 listing to post_images rows; lifecycle rule on delete marker.</td><td>Build</td></tr>
+          <tr><td class="text-sm">Public API caching staleness after publish</td><td class="text-sm text-base-content/70">On publish, purge the tenant's keys / bump a generation tag; ISR revalidation on reader sites.</td><td>Build</td></tr>
+          <tr><td class="text-sm">Import conversion fidelity (PDFs, exotic DOCX)</td><td class="text-sm text-base-content/70">Per-format converters with a fidelity warning surfaced in the preview (ST-23); scanned/no-text PDFs fail loudly with a hint; failed imports never create a partial post. Contract-tested per format/sub.</td><td><span class="badge badge-soft badge-info">Fixing</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Markdown flavor &amp; extensions</td><td class="text-sm text-base-content/70">Adopted: GitHub-Flavored Markdown with fenced code blocks + server-side syntax highlighting; image captions via metadata.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Interactive markdown editor (edit from rendered view)</td><td class="text-sm text-base-content/70">Adopted: bidirectional editor — every change re-renders the preview, clicking a rendered block returns it to its markdown source range for inline editing (section 11); the shared renderer emits per-block source metadata that also powers the import review diff.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Invitation → SSO join flow</td><td class="text-sm text-base-content/70">Adopted: invite by email (consumed at first verified sign-in) <em>plus</em> role-baked tenant invite links; both stored in invitations.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Password auth at all?</td><td class="text-sm text-base-content/70">Adopted: email+password kept as optional fallback; SSO-only is a per-platform config toggle.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Image variants (resize / WebP)</td><td class="text-sm text-base-content/70">Adopted at upload time: background worker builds 480/800/1200 + WebP objects, recorded in <code class="font-mono text-xs">post_images.variants</code>; reader srcset derives from them; URLs stay content-hashed and immutable.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+          <tr class="bg-base-100"><td class="text-sm">Document import → markdown</td><td class="text-sm text-base-content/70">Adopted: PDF · DOCX · Google Docs · ODT · RTF · HTML import into a markdown draft (ST-23) — async, previewed before apply, authz per section 5. Google Docs reuses the stored Google identity and requires a <code class="font-mono text-xs">drive.readonly</code> export scope at consent.</td><td><span class="badge badge-soft badge-success">Adopted</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div tabindex="0" class="collapse collapse-arrow bg-base-200 rounded-box mt-4">
+      <div class="collapse-title text-base font-semibold">RLS hardening checklist — how it can't silently leak</div>
+      <div class="collapse-content">
+        <ol class="list-decimal pl-5 mt-2 space-y-2">
+          <li class="text-sm text-base-content/70"><strong>Force it on, every table.</strong> <code class="font-mono text-xs">ALTER TABLE … ENABLE ROW LEVEL SECURITY;</code> <em>and</em> <code class="font-mono text-xs">FORCE ROW LEVEL SECURITY;</code> so even the table owner is subject to policies — ownership churn is the classic way RLS gets silently bypassed.</li>
+          <li class="text-sm text-base-content/70"><strong>Fail-closed tenant scoping.</strong> One function <code class="font-mono text-xs">current_tenant()</code> reads <code class="font-mono text-xs">current_setting('app.tenant_id', true)</code>, set via <code class="font-mono text-xs">SET LOCAL</code> inside each request's transaction. Session-level <code class="font-mono text-xs">SET</code> is banned — a pooled/reused connection must never carry a stale tenant.</li>
+          <li class="text-sm text-base-content/70"><strong>No catch-all policy.</strong> Every tenant-scoped table gets exactly one default-<code class="font-mono text-xs">USING</code> policy matching <code class="font-mono text-xs">current_tenant() = tenant_id</code>. If the setting is absent the policy matches nothing → a leaked/guest call breaks loudly instead of silently returning rows.</li>
+          <li class="text-sm text-base-content/70"><strong>Writes are checked too.</strong> Policies use <code class="font-mono text-xs">WITH CHECK</code>, not just <code class="font-mono text-xs">USING</code>, so <code class="font-mono text-xs">INSERT</code>/<code class="font-mono text-xs">UPDATE</code> cannot create or move rows into another tenant.</li>
+          <li class="text-sm text-base-content/70"><strong>Super_admin is explicit, not accidental.</strong> The platform role gets <code class="font-mono text-xs">BYPASSRLS</code> (or policy-owner) — a named, reviewed precedent, never an ad-hoc <code class="font-mono text-xs">SUPERUSER</code> workaround. Everything else stays inside policies.</li>
+          <li class="text-sm text-base-content/70"><strong>Contract tests assert non-leak.</strong> One "cannot see other tenant" test per role (guest/author/editor/admin) keyed to ST-2, ST-3, ST-6, ST-20: a cross-tenant <code class="font-mono text-xs">GET</code>/<code class="font-mono text-xs">PATCH</code>/<code class="font-mono text-xs">INSERT</code> must return <code class="font-mono text-xs">0</code> rows / <code class="font-mono text-xs">403</code>.</li>
+          <li class="text-sm text-base-content/70"><strong>Migration lint.</strong> A CI check iterates every tenant-scoped table and fails the build if it lacks <code class="font-mono text-xs">ENABLE</code>+<code class="font-mono text-xs">FORCE</code> and a policy referencing <code class="font-mono text-xs">current_tenant()</code>.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="mt-8 card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-lg">Next step after review</h3>
+        <p class="text-sm text-base-content/70">Once the defaults and open decisions are confirmed, the plan drops straight into implementation: schema DDL + RLS policies first, then services, then the editor UI, then one reader site as the reference consumer. The user stories above (ST-1 … ST-23) become the contract test suite each layer must pass.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="mt-12 pt-6 border-t border-base-content/10 text-xs text-base-content/50">
+    Open Blog implementation plan · language-agnostic · generated for review — annotate anything on this page to queue feedback.
+  </footer>
+
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+  function compositeRgba(foreground, background) {
+    const fa = foreground[3] / 255;
+    const ba = background[3] / 255;
+    const alpha = fa + ba * (1 - fa);
+    if (alpha === 0) return [0, 0, 0, 0];
+    return [
+      (foreground[0] * fa + background[0] * ba * (1 - fa)) / alpha,
+      (foreground[1] * fa + background[1] * ba * (1 - fa)) / alpha,
+      (foreground[2] * fa + background[2] * ba * (1 - fa)) / alpha,
+      alpha * 255,
+    ];
+  }
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    const cs = getComputedStyle(root).colorScheme;
+    if (cs.includes("dark") && !cs.includes("light")) return true;
+    if (cs.includes("light") && !cs.includes("dark")) return false;
+    return darkQuery.matches;
+  }
+
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied;
+  let rendering = false;
+  let queued = false;
+  function queueRender() {
+    queued = true;
+    if (rendering) return;
+    void render();
+  }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) {
+          el.removeAttribute("data-processed");
+          el.textContent = src;
+        }
+        try {
+          await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+        } catch (error) {
+          console.error("Mermaid diagram render failed:", error);
+          return;
+        }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  const themeObserver = new MutationObserver(queueRender);
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    themeObserver.observe(el, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+  }
+  document.addEventListener("change", queueRender, true);
+  document.addEventListener("transitionend", ({ propertyName }) => {
+    if (propertyName === "background-color") queueRender();
+  }, true);
+  darkQuery.addEventListener("change", queueRender);
+</script>
+</body>
+</html>
