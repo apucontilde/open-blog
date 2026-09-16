@@ -15,7 +15,7 @@ import (
 	"openblog/internal/authz"
 )
 
-// TestConfirmValidation — mime allow-list and size cap are enforced before any
+// TestConfirmValidation: mime allow-list and size cap are enforced before any
 // row is written.
 func TestConfirmValidation(t *testing.T) {
 	m := New(Config{CDNBase: "https://media.example.com"}, nil, nil)
@@ -32,8 +32,8 @@ func TestConfirmValidation(t *testing.T) {
 	}
 }
 
-// TestBuildVariantsJSON — the canonical variants shape: one entry per width,
-// url/width/height present, pending marked in the no-vips branch.
+// TestBuildVariantsJSON: one entry per width, url/width/height present, pending
+// marked in the no-vips branch.
 func TestBuildVariantsJSON(t *testing.T) {
 	p := Processed{
 		OriginalWidth:  1600,
@@ -81,8 +81,8 @@ func TestBuildVariantsJSON(t *testing.T) {
 	}
 }
 
-// TestNoopProcessorDegradation — without libvips the processor derives the
-// variant keys, reads header dims for png, and yields no encoded data.
+// TestNoopProcessorDegradation: without libvips the processor derives variant
+// keys, reads png header dims, and yields no encoded data.
 func TestNoopProcessorDegradation(t *testing.T) {
 	var buf bytes.Buffer
 	img := image.NewRGBA(image.Rect(0, 0, 2, 1))
@@ -114,9 +114,8 @@ func TestNoopProcessorDegradation(t *testing.T) {
 	}
 }
 
-// TestDeletePermissionMatrix — the delete permission rule reused from authz:
-// platform/editor+ may delete any row; a plain author may only delete images
-// on a post they own; ownership check via authz.OwnsPost.
+// TestDeletePermissionMatrix: editors+ delete any row; a plain author only
+// images on a post they own.
 func TestDeletePermissionMatrix(t *testing.T) {
 	user := uuid.New()
 	other := uuid.New()
@@ -138,8 +137,7 @@ func TestDeletePermissionMatrix(t *testing.T) {
 
 	for _, c := range actors {
 		t.Run(c.name, func(t *testing.T) {
-			// Mirrors media.Delete's decision: editors+ skip the ownership
-			// check, authors are confined to posts they own.
+			// Mirrors media.Delete's decision.
 			var decision bool
 			if c.actor.Can(authz.CapEditAnyPost) {
 				decision = true
@@ -153,9 +151,8 @@ func TestDeletePermissionMatrix(t *testing.T) {
 	}
 }
 
-// TestScopeFromActorUsedByDelete — Delete derives its scope exclusively from
-// the actor (authz scopeFromActor contract); a platform actor gets a nil
-// tenant so RLS is widened by app_scope and never by a guessed tenant.
+// TestScopeFromActorUsedByDelete: a platform actor gets a nil tenant so RLS is
+// widened by app_scope, never by a guessed tenant.
 func TestScopeFromActorUsedByDelete(t *testing.T) {
 	tid := uuid.New()
 	s := authz.ScopeFromActor(authz.Actor{UserID: uuid.New(), Tenant: &tid, Role: authz.RoleOwner})

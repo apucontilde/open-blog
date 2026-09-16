@@ -18,18 +18,13 @@ import (
 	"openblog/internal/store"
 )
 
-// PurgeJobKind is the jobs.kind marking a CDN purge, written INSIDE the same
-// transaction as the public change (008 sweep finding 9). A worker (006/010 or
-// a hardcoded handler) consumes jobs.JobPayload: TenantID plus Data holding a
-// purgePayload jsonb. (kind, dedupe_key) dedupes per tenant — the key is the
-// tenant id — so re-publication never double-inserts.
+// PurgeJobKind is the jobs.kind for a CDN purge, written in the same tx as the
+// public change; (kind, dedupe_key = tenant id) dedupes per tenant. Its Data is
+// a purgePayload.
 const PurgeJobKind = "purge"
 
-// purgePayload is the Data payload of a PurgeJobKind job: the tenant whose
-// public surface changed, the post that changed, the new tenants.content_version
-// (ETag anchor, sweep finding 6), and the paths to invalidate. Paths covers the
-// whole tenant surface because content_version is tenant-global; 009's read path
-// tolerates a purge lag of one cycle.
+// purgePayload is a PurgeJobKind job's Data: the changed tenant/post, the new
+// tenants.content_version (ETag anchor) and the paths to invalidate.
 type purgePayload struct {
 	TenantID uuid.UUID `json:"tenant_id"`
 	PostID   uuid.UUID `json:"post_id"`
@@ -37,22 +32,18 @@ type purgePayload struct {
 	Paths    []string  `json:"paths"`
 }
 
-// Config carries the renderer's media policy. Supplied by 010 from env, never
-// parsed here.
+// Config carries the renderer's media policy, supplied from env.
 type Config struct {
-	MediaOrigin string // <img> host allow-list, e.g. "media.example.com"
+	MediaOrigin string // <img> host allow-list
 }
 
-// Service exposes the post lifecycle to 010's handlers. Authorization is
-// routed through authz (capabilities + OwnsPost); row visibility is enforced
-// by store RLS scoped to the actor.
+// Service is authorized through authz; row visibility comes from store RLS
+// scoped to the actor.
 type Service struct {
 	db  *store.DB
 	cfg Config
 }
 
-// New builds a Service over db; an empty MediaOrigin defaults to
-// media.example.com.
 func New(db *store.DB, cfg Config) *Service {
 	if cfg.MediaOrigin == "" {
 		cfg.MediaOrigin = defaultMediaOrigin
@@ -60,8 +51,8 @@ func New(db *store.DB, cfg Config) *Service {
 	return &Service{db: db, cfg: cfg}
 }
 
-// CreateInput is the request body of POST /admin/posts. Slug is optional;
-// an empty title-derived slug is auto-derived and uniquified (ST-5).
+// CreateInput is the POST /admin/posts body; an empty Slug is derived from
+// Title and uniquified.
 type CreateInput struct {
 	Title           string
 	ContentMarkdown string
@@ -70,9 +61,8 @@ type CreateInput struct {
 	Metadata        []byte // jsonb
 }
 
-// Create drafts a post: author_id from the actor, tenant_id from the actor's
-// scope (client-supplied tenant ignored), slug derived and uniquified, markdown
-// rendered to sanitized HTML once.
+// Create drafts a post under the actor's tenant; author and tenant come from
+// the actor, never from the input.
 func (s *Service) Create(ctx context.Context, actor authz.Actor, in CreateInput) (store.Post, error) {
 	if err := authz.Require(actor, authz.CapCreateDraft); err != nil {
 		return store.Post{}, err
@@ -122,9 +112,8 @@ func (s *Service) Create(ctx context.Context, actor authz.Actor, in CreateInput)
 	return post, nil
 }
 
-// Get reads one post by id, role-aware: a plain author may read only their own
-// rows; editors+ and platform read tenant-wide. RLS already confines the read
-// to the actor's tenant.
+// Get is role-aware: a plain author may read only their own rows, editors+ and
+// platform tenant-wide. RLS confines the read to the actor's tenant.
 func (s *Service) Get(ctx context.Context, actor authz.Actor, id uuid.UUID) (store.Post, error) {
 	scope := authz.ScopeFromActor(actor)
 	var p store.Post
@@ -151,9 +140,8 @@ type ListFilter struct {
 	AuthorID *uuid.UUID // editors+ filter; authors are pinned to themselves
 }
 
-// List returns the list projection (metadata + slug only, no markdown body).
-// Authors see their own posts only; editors+ see the tenant-wide set (ST-6,
-// ST-11).
+// List returns the summary projection (no markdown body). Authors see their own
+// posts only; editors+ see the tenant-wide set.
 func (s *Service) List(ctx context.Context, actor authz.Actor, f ListFilter) ([]store.PostSummary, error) {
 	if err := authz.Require(actor, authz.CapCreateDraft); err != nil {
 		return nil, err
@@ -175,10 +163,9 @@ func (s *Service) List(ctx context.Context, actor authz.Actor, f ListFilter) ([]
 	return out, nil
 }
 
-// UpdateInput is the PATCH body: nil fields are unchanged. Setting
-// ContentMarkdown re-renders content_html; every PATCH re-renders regardless
-// (draft-preview parity), and a PATCH on a published post additionally bumps
-// tenants.content_version and enqueues the CDN purge in the same tx.
+// UpdateInput is the PATCH body: nil fields are unchanged. Every PATCH
+// re-renders content_html; on a published post it also bumps
+// tenants.content_version and enqueues the purge in the same tx.
 type UpdateInput struct {
 	Title           *string
 	ContentMarkdown *string
@@ -205,7 +192,7 @@ func (s *Service) Update(ctx context.Context, actor authz.Actor, id uuid.UUID, i
 			return authz.ErrForbidden
 		}
 		if !actor.Platform && actor.Role == authz.RoleAuthor && p.Status != store.PostDraft {
-			return authz.ErrForbidden // plain author: own draft only (ST-6)
+			return authz.ErrForbidden // plain author: own draft only
 		}
 
 		title := p.Title
@@ -227,15 +214,13 @@ func (s *Service) Update(ctx context.Context, actor authz.Actor, id uuid.UUID, i
 		slug := p.Slug
 		if in.Slug != nil {
 			if p.Status == store.PostPublished {
-				return ErrSlugImmutable // slug is a public URL component (Q3)
+				return ErrSlugImmutable
 			}
 			slug, err = uniqueSlug(ctx, q, scope.TenantID, *in.Slug)
 			if err != nil {
 				return err
 			}
 		}
-		// Every PATCH re-renders: the stored content_html is never stale for
-		// the editor preview, and a published PATCH ships current HTML.
 		html, err := s.render([]byte(md), meta)
 		if err != nil {
 			return err
@@ -258,34 +243,25 @@ func (s *Service) Update(ctx context.Context, actor authz.Actor, id uuid.UUID, i
 	return out, nil
 }
 
-// Publish makes the post public: editor+ only (ST-9), non-empty content,
-// published_at = now(), re-render, tenants.content_version bump and the CDN
-// purge enqueued atomically.
+// Publish makes the post public (editor+): non-empty content, published_at =
+// now, re-render, content_version bump and purge in one tx.
 func (s *Service) Publish(ctx context.Context, actor authz.Actor, id uuid.UUID) (store.Post, error) {
-	return s.transition(ctx, actor, id, store.PostPublished, publish)
+	return s.transition(ctx, actor, id, store.PostPublished, true)
 }
 
-// Unpublish returns a public post to draft (editor+, ST-10) with the same
-// atomic bump + purge; content_version anchors the hide.
+// Unpublish returns a public post to draft (editor+), same atomic bump + purge.
 func (s *Service) Unpublish(ctx context.Context, actor authz.Actor, id uuid.UUID) (store.Post, error) {
-	return s.transition(ctx, actor, id, store.PostDraft, unpublish)
+	return s.transition(ctx, actor, id, store.PostDraft, false)
 }
 
-// Archive hides a post from the public listing (editor+, ST-10) with the same
-// atomic bump + purge.
+// Archive hides a post from the public listing (editor+), same atomic bump + purge.
 func (s *Service) Archive(ctx context.Context, actor authz.Actor, id uuid.UUID) (store.Post, error) {
-	return s.transition(ctx, actor, id, store.PostArchived, archive)
+	return s.transition(ctx, actor, id, store.PostArchived, false)
 }
 
-type transitionKind int
-
-const (
-	publish transitionKind = iota
-	unpublish
-	archive
-)
-
-func (s *Service) transition(ctx context.Context, actor authz.Actor, id uuid.UUID, status store.PostStatus, kind transitionKind) (store.Post, error) {
+// transition always re-renders content_html and, atomically, bumps
+// content_version and enqueues the purge.
+func (s *Service) transition(ctx context.Context, actor authz.Actor, id uuid.UUID, status store.PostStatus, publishing bool) (store.Post, error) {
 	if err := authz.Require(actor, authz.CapPublishArchive); err != nil {
 		return store.Post{}, err
 	}
@@ -299,15 +275,15 @@ func (s *Service) transition(ctx context.Context, actor authz.Actor, id uuid.UUI
 		if err != nil {
 			return err
 		}
-		if kind == publish && strings.TrimSpace(p.ContentMarkdown) == "" {
-			return ErrEmptyContent // never publish an empty body
+		if publishing && strings.TrimSpace(p.ContentMarkdown) == "" {
+			return ErrEmptyContent
 		}
 		html, err := s.render([]byte(p.ContentMarkdown), p.Metadata)
 		if err != nil {
 			return err
 		}
 		var publishedAt *time.Time
-		if kind == publish {
+		if publishing {
 			t := time.Now()
 			publishedAt = &t
 		}
@@ -323,9 +299,8 @@ func (s *Service) transition(ctx context.Context, actor authz.Actor, id uuid.UUI
 	return out, nil
 }
 
-// Delete removes a post: a plain author may delete only their own draft,
-// editors+ any post (005 DELETE rule). Child post_images cascade; imports are
-// set NULL so re-import stays possible; orphan purge is the 006 sweeper's job.
+// Delete: a plain author may delete only their own draft, editors+ any post.
+// post_images cascade; imports are set NULL so re-import stays possible.
 func (s *Service) Delete(ctx context.Context, actor authz.Actor, id uuid.UUID) error {
 	if err := authz.Require(actor, authz.CapEditOwnDraft); err != nil {
 		return err
@@ -349,25 +324,25 @@ func (s *Service) Delete(ctx context.Context, actor authz.Actor, id uuid.UUID) e
 	})
 }
 
-// purge records a public-visible change atomically: bump the tenant's
-// content_version and enqueue the CDN purge in the same transaction (008
-// sweep finding 9). The job payload follows the workers.JobPayload contract —
-// {tenant_id, data:{...}} — so any kind handler can consume it regardless of
-// which domain produced it. A duplicate (kind, dedupe_key) is the normal
-// re-publish case and is a no-op.
+// purge records a public-visible change atomically: content_version bump plus
+// CDN purge in the same tx. A duplicate (kind, dedupe_key) re-publish is a no-op.
 func (s *Service) purge(ctx context.Context, q *store.Queries, tenantID uuid.UUID, p store.Post) error {
 	version, err := q.BumpContentVersion(ctx, tenantID)
 	if err != nil {
 		return err
 	}
+	data, err := json.Marshal(purgePayload{
+		TenantID: tenantID,
+		PostID:   p.ID,
+		Version:  version,
+		Paths:    []string{"/"},
+	})
+	if err != nil {
+		return err
+	}
 	_, err = jobs.Enqueue(ctx, q.Tx(), PurgeJobKind, tenantID.String(), jobs.JobPayload{
 		TenantID: tenantID,
-		Data: mustJSON(purgePayload{
-			TenantID: tenantID,
-			PostID:   p.ID,
-			Version:  version,
-			Paths:    []string{"/"},
-		}),
+		Data:     data,
 	})
 	if errors.Is(err, jobs.ErrDuplicate) {
 		return nil
@@ -375,19 +350,8 @@ func (s *Service) purge(ctx context.Context, q *store.Queries, tenantID uuid.UUI
 	return err
 }
 
-// mustJSON marshals a purge payload into the JobPayload.Data slot; a marshal
-// failure of our own fixed-shape struct cannot happen (all fields JSON-safe).
-func mustJSON(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
-
-// render is the service's single rendezvous with the renderer: it applies the
-// metadata opt-in — {"allow_external_images": true} relaxes the image origin
-// whitelist to any http(s) host.
+// render applies the image-host policy; metadata {"allow_external_images":true}
+// opens all http(s) hosts.
 func (s *Service) render(md, metadata []byte) ([]byte, error) {
 	hosts := []string{s.cfg.MediaOrigin}
 	if metadataAllowsExternalImages(metadata) {
@@ -408,13 +372,10 @@ func metadataAllowsExternalImages(meta []byte) bool {
 	return on
 }
 
-var (
-	nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
-)
+var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
-// uniqueSlug returns desired (or a derived form of it) made unique inside the
-// tenant: an explicit slug is the base, otherwise one is derived from the
-// title; collisions get a numeric suffix (create + draft PATCH).
+// uniqueSlug makes desired unique within the tenant: derive from title if
+// empty, suffix -2, -3 on collision.
 func uniqueSlug(ctx context.Context, q *store.Queries, tenantID uuid.UUID, desired string) (string, error) {
 	base := deriveSlug(desired)
 	slug := base
@@ -433,8 +394,8 @@ func uniqueSlug(ctx context.Context, q *store.Queries, tenantID uuid.UUID, desir
 	}
 }
 
-// deriveSlug derives a slug from a title (empty or all-punctuation titles
-// fall back to "post"). The DB CHECK regex caps it at 63 chars.
+// deriveSlug lowercases/hyphenates a title, falling back to "post"; capped at
+// 63 chars (DB CHECK).
 func deriveSlug(title string) string {
 	s := strings.ToLower(title)
 	s = nonSlug.ReplaceAllString(s, "-")

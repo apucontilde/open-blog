@@ -31,9 +31,8 @@ func TestScopeFromActor(t *testing.T) {
 	}
 }
 
+// Platform:true must never come from a role — only Actor.Platform carries it.
 func TestScopeFromActorPlatformOnlyForSuperAdmin(t *testing.T) {
-	// Platform:true must never be derivable from a non-super role — only the
-	// Platform bool on the Actor carries it into the scope.
 	tid := uuid.New()
 	for _, role := range []Role{RoleAuthor, RoleEditor, RoleAdmin, RoleOwner} {
 		a := Actor{UserID: uuid.New(), Tenant: &tid, Role: role}

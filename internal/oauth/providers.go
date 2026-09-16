@@ -24,9 +24,6 @@ const (
 	githubLoginScopes = "read:user user:email"
 )
 
-// Claims is the provider-normalized identity decided at the callback: an
-// opaque subject, a (verified) email, and a display name. Email normalized
-// lowercase by the caller before any write.
 type Claims struct {
 	Subject       string
 	Email         string
@@ -34,15 +31,13 @@ type Claims struct {
 	DisplayName   string
 }
 
-// provider couples one IdP's oauth2 config to its claims fetcher.
 type provider struct {
 	name   string
 	conf   *oauth2.Config
 	claims func(ctx context.Context, accessToken string) (Claims, error)
 }
 
-// oidcUserinfo fetches Google's OIDC /userinfo with the exchanged access
-// token. email_verified is honored exactly: a missing or false flag is false.
+// oidcUserinfo fetches Google's OIDC userinfo; email_verified is honored exactly.
 func oidcUserinfo(userinfoURL string, client *http.Client) func(ctx context.Context, accessToken string) (Claims, error) {
 	return func(ctx context.Context, accessToken string) (Claims, error) {
 		b, err := getJSON(ctx, client, userinfoURL, accessToken, nil)
@@ -70,8 +65,7 @@ func oidcUserinfo(userinfoURL string, client *http.Client) func(ctx context.Cont
 	}
 }
 
-// githubUserAndEmails resolves the numeric user id from /user and the verified
-// primary email from /user/emails (the scope user:email gates that call).
+// githubUserAndEmails resolves the numeric user id and the verified primary email.
 func githubUserAndEmails(userURL, emailsURL string, client *http.Client) func(ctx context.Context, accessToken string) (Claims, error) {
 	return func(ctx context.Context, accessToken string) (Claims, error) {
 		b, err := getJSON(ctx, client, userURL, accessToken, map[string]string{
@@ -104,7 +98,7 @@ func githubUserAndEmails(userURL, emailsURL string, client *http.Client) func(ct
 			"Accept": "application/vnd.github+json",
 		})
 		if err != nil {
-			return c, nil // emails optional; fall back to the public /user email
+			return c, nil // emails optional; fall back to the /user email
 		}
 		var es []struct {
 			Email    string `json:"email"`
@@ -114,7 +108,7 @@ func githubUserAndEmails(userURL, emailsURL string, client *http.Client) func(ct
 		if err := json.Unmarshal(eb, &es); err != nil {
 			return c, nil
 		}
-		for _, e := range es { // verified primary beats verified beats first
+		for _, e := range es { // verified primary, else verified, else first
 			if e.Verified && e.Primary {
 				c.Email, c.EmailVerified = e.Email, true
 				return c, nil
@@ -133,7 +127,6 @@ func githubUserAndEmails(userURL, emailsURL string, client *http.Client) func(ct
 	}
 }
 
-// getJSON does an authenticated GET and returns the body for a 2xx response.
 func getJSON(ctx context.Context, client *http.Client, url, accessToken string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

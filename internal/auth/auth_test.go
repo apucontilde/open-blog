@@ -21,7 +21,6 @@ func TestNewTokenRoundTrip(t *testing.T) {
 	if len(raw) != TokenLen {
 		t.Fatalf("decoded token length = %d, want %d", len(raw), TokenLen)
 	}
-	// Re-encoding the decoded bytes reproduces the exact token string.
 	if re := base64.RawURLEncoding.EncodeToString(raw); re != token {
 		t.Fatalf("encode/decode round-trip mismatch: %q != %q", re, token)
 	}
@@ -90,7 +89,6 @@ func TestHashPasswordRoundTrip(t *testing.T) {
 	if err := verifyPassword(ctx, l, encoded, "wrong"); !errors.Is(err, ErrPasswordMismatch) {
 		t.Fatalf("verify wrong password = %v, want ErrPasswordMismatch", err)
 	}
-	// Each hash must draw a fresh salt.
 	encoded2, err := hashPassword(ctx, l, "s3cret")
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)
@@ -116,13 +114,10 @@ func TestVerifyMalformedHashFailsClosed(t *testing.T) {
 	}
 }
 
-// TestVerifyBestEffortConstantTime covers the unknown-email / passwordless
-// branch: the dummy hash is exercised (real argon2 run) but always fails.
 func TestVerifyBestEffort(t *testing.T) {
 	a := &Auth{lim: newLimiter(argon2Concurrency)}
 	ctx := context.Background()
 
-	// NULL stored hash (unknown email or SSO-only account): always rejected.
 	if err := a.verifyBestEffort(ctx, nil, dummyPassword); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("dummy branch with dummy password = %v, want ErrInvalidCredentials", err)
 	}
@@ -130,12 +125,10 @@ func TestVerifyBestEffort(t *testing.T) {
 		t.Fatalf("dummy branch = %v, want ErrInvalidCredentials", err)
 	}
 
-	// The stored hash is fixed and future calls reuse it (sync.Once).
 	if !strings.HasPrefix(dummyHash(), "$argon2id$") {
 		t.Fatalf("dummyHash not argon2id-encoded: %q", dummyHash())
 	}
 
-	// Real stored hash: success only on the correct password.
 	encoded, err := hashPassword(ctx, a.lim, "hunter2")
 	if err != nil {
 		t.Fatalf("hashPassword: %v", err)

@@ -1,16 +1,16 @@
 -- +goose Up
+-- NULL-safe: strict + missing_ok -> NULL -> not 'on' -> false
 create function app_scope() returns boolean
 language sql stable strict as $$
     select current_setting('app.platform', true) = 'on'
 $$;
--- NULL-safe: strict + current_setting with missing_ok drops to NULL -> not 'on' -> false
 
 create function current_tenant() returns uuid
 language sql stable strict as $$
     select nullif(current_setting('app.tenant_id', true), '')::uuid
 $$;
 
--- one call per tenant-scoped table; the set is FIXED: posts, post_images, imports only (sweep)
+-- tenant-scoped set is FIXED: posts, post_images, imports (FORCE + one tenant_scope policy each)
 -- +goose StatementBegin
 do $$
 declare t text;

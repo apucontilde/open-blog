@@ -28,7 +28,6 @@ import (
 	"openblog/internal/store"
 )
 
-// server is the assembled dependency graph for the api binary.
 type server struct {
 	db            *store.DB
 	posts         *posts.Service
@@ -43,8 +42,7 @@ type server struct {
 	limiter       *rateLimit
 }
 
-// Deps is the constructed module graph the router serves. cmd/api builds it
-// from env config; the httptest harness builds it against a throwaway DB.
+// Deps is the module graph the router serves.
 type Deps struct {
 	DB            *store.DB
 	Posts         *posts.Service
@@ -58,7 +56,6 @@ type Deps struct {
 	Origins       []string
 }
 
-// New assembles the router from already-constructed modules.
 func New(d Deps) *server {
 	return &server{
 		db:            d.DB,
@@ -81,12 +78,9 @@ const (
 	ctxScope
 	ctxToken
 	ctxBody
-	ctxReqID
 )
 
-// adminHandler is the typed request handler for session-protected routes; the
-// auth middleware has already attached the Actor, its store.Scope, and the
-// verified session token to r.Context().
+// adminHandler runs after auth has attached ctxActor, ctxScope, and ctxToken.
 type adminHandler func(http.ResponseWriter, *http.Request)
 
 func actorFrom(r *http.Request) authz.Actor {
@@ -104,14 +98,13 @@ func tokenFrom(r *http.Request) string {
 	return t
 }
 
-// Routes assembles the Go 1.22+ ServeMux exactly as plan §Router.
 func (s *server) Routes() http.Handler {
 	if s.limiter == nil {
 		s.limiter = newRateLimit(10, 40, 10*time.Minute)
 	}
 	mux := http.NewServeMux()
 
-	// public — 009, no auth, no rate limit
+	// public: no auth, no rate limit
 	mux.Handle("GET /livez", s.base(livez()))
 	mux.Handle("GET /readyz", s.base(readyz(s.db)))
 	mux.Handle("GET /public/{tenant}/site", s.base(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,13 +120,13 @@ func (s *server) Routes() http.Handler {
 		s.pubResp(w, resp, err)
 	})))
 
-	// auth entry — rate-limited, keyed by IP + email
+	// auth entry: rate-limited by IP (+ email for signup/login)
 	mux.Handle("POST /auth/signup", s.authRate(s.captureBody(http.HandlerFunc(s.handleSignup))))
 	mux.Handle("POST /auth/login", s.authRate(s.captureBody(http.HandlerFunc(s.handleLogin))))
 	mux.Handle("POST /auth/oauth/start", s.base(s.ipRate(http.HandlerFunc(s.handleOAuthStart))))
 	mux.Handle("GET /auth/oauth/callback", s.base(s.ipRate(http.HandlerFunc(s.handleOAuthCallback))))
 
-	// admin — session required, actor attached
+	// admin: session required
 	mux.Handle("POST /auth/logout", s.base(s.auth(s.handleLogout)))
 	mux.Handle("GET /auth/me", s.base(s.auth(s.handleMe)))
 	mux.Handle("PUT /auth/me/active-tenant", s.base(s.auth(s.handleSetTenant)))
@@ -168,7 +161,7 @@ func (s *server) base(next http.Handler) http.Handler {
 	return s.recover(s.requestID(s.accessLog(s.cors(next))))
 }
 
-// ipRate adds the IP-keyed rate limiter (auth + mutation routes only).
+// ipRate adds the IP-keyed limiter (auth + mutation routes only).
 func (s *server) ipRate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.limiter.Allow("mutation|" + clientIP(r)) {
@@ -179,7 +172,7 @@ func (s *server) ipRate(next http.Handler) http.Handler {
 	})
 }
 
-// authRate is the IP + email limiter for POST /auth/signup and /auth/login.
+// authRate is the IP + email limiter for signup/login.
 func (s *server) authRate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -204,8 +197,7 @@ func (s *server) authRate(next http.Handler) http.Handler {
 	})
 }
 
-// captureBody reads the request body once and stashes it in context so the
-// auth rate limiter can key on email without consuming the handler's body.
+// captureBody buffers the body once so authRate can read email without consuming it.
 func (s *server) captureBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -220,9 +212,7 @@ func (s *server) captureBody(next http.Handler) http.Handler {
 	})
 }
 
-// auth attaches Actor, store.Scope, and session token to the context. It is
-// the only caller of authz.ScopeFromActor (sweep finding 26): Platform can
-// never be set from session data, params, or handler code.
+// auth attaches Actor, the ScopeFromActor scope, and token; Platform is never set from input.
 func (s *server) auth(h adminHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := s.sessionToken(r)
@@ -233,9 +223,7 @@ func (s *server) auth(h adminHandler) http.Handler {
 		}
 		actor, err := authz.ResolveActor(r.Context(), s.db, userID, tenantID)
 		if err != nil {
-			// A tenant-less session (fresh login/SSO, ST-20) cannot resolve a
-			// membership yet; attach a session-only actor so /auth/me and the
-			// active-tenant switch stay usable. Anything else is a real 401.
+			// A tenant-less session gets a session-only actor; anything else is a 401.
 			if errors.Is(err, store.ErrNotMember) && tenantID == uuid.Nil {
 				actor = authz.Actor{UserID: userID}
 			} else {
@@ -251,8 +239,7 @@ func (s *server) auth(h adminHandler) http.Handler {
 	})
 }
 
-// sessionToken prefers the Authorization: Bearer header (cross-origin SPA) and
-// falls back to the SameSite=Lax session cookie.
+// sessionToken prefers Authorization: Bearer, then the SameSite=Lax cookie.
 func (s *server) sessionToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
 		return strings.TrimSpace(h[7:])
@@ -271,7 +258,7 @@ func (s *server) sessionCookie(token string) *http.Cookie {
 		HttpOnly: true,
 		Secure:   s.sessionSecure,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int((30 * 24 * 3600) * time.Second / time.Second),
+		MaxAge:   30 * 24 * 60 * 60,
 	}
 }
 
@@ -307,8 +294,7 @@ func (s *server) requestID(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
-		ctx := context.WithValue(r.Context(), ctxReqID, id)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -330,7 +316,6 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// accessLog emits one line per request: method path status µs.
 func (s *server) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -405,16 +390,13 @@ func readyz(db *store.DB) http.Handler {
 	})
 }
 
-// rateLimit is the in-memory IP/email bucket store with TTL eviction. Keys are
-// evicted after idleTTL without a hit, so the map cannot grow unbounded with
-// distinct IPs (sweep finding 21). One instance, not shared across replicas.
+// rateLimit is an in-memory IP/email bucket store with idle-TTL eviction; per-process only.
 type rateLimit struct {
 	mu      sync.Mutex
 	buckets map[string]*rateBkt
 	rps     float64
 	burst   int
 	idleTTL time.Duration
-	stop    chan struct{}
 }
 
 type rateBkt struct {
@@ -428,7 +410,6 @@ func newRateLimit(rps float64, burst int, idleTTL time.Duration) *rateLimit {
 		rps:     rps,
 		burst:   burst,
 		idleTTL: idleTTL,
-		stop:    make(chan struct{}),
 	}
 	go r.janitor()
 	return r
@@ -447,23 +428,16 @@ func (r *rateLimit) Allow(key string) bool {
 	return ok
 }
 
-func (r *rateLimit) Close() { close(r.stop) }
-
 func (r *rateLimit) janitor() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
-	for {
-		select {
-		case <-r.stop:
-			return
-		case now := <-t.C:
-			r.mu.Lock()
-			for k, b := range r.buckets {
-				if now.Sub(b.last) > r.idleTTL {
-					delete(r.buckets, k)
-				}
+	for now := range t.C {
+		r.mu.Lock()
+		for k, b := range r.buckets {
+			if now.Sub(b.last) > r.idleTTL {
+				delete(r.buckets, k)
 			}
-			r.mu.Unlock()
 		}
+		r.mu.Unlock()
 	}
 }

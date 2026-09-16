@@ -13,18 +13,14 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// ErrPasswordMismatch is internal: a stored-hash verification failed.
-// Callers (verifyBestEffort) always map it to ErrInvalidCredentials.
+// Internal; callers map it to ErrInvalidCredentials.
 var ErrPasswordMismatch = errors.New("auth: password mismatch")
 
-// dummyPassword is hashed once at init and verified against when the identity
-// check must burn the same argon2 cost (unknown email / SSO-only account). It
-// is never accepted: verifyBestEffort returns ErrInvalidCredentials on that
-// branch regardless of the outcome.
+// dummyPassword is only ever hashed to burn the same argon2 cost for unknown
+// identities; it is never accepted.
 const dummyPassword = "openblog-internal-dummy-hash"
 
-// limiter caps concurrent argon2 invocations to bound peak memory
-// (cap × 64 MiB). It is the only CPU- and memory-heavy operation here.
+// limiter bounds concurrent argon2 to cap×64 MiB peak.
 type limiter struct {
 	sem chan struct{}
 }
@@ -46,17 +42,14 @@ func (l *limiter) release() {
 	<-l.sem
 }
 
-// dummyHash is the cached argon2 encoding of dummyPassword, computed once.
 var dummyHash = sync.OnceValue(func() string {
 	encoded, err := hashPassword(context.Background(), newLimiter(1), dummyPassword)
 	if err != nil {
-		panic(err) // encoding with fixed params cannot fail
+		panic(err) // fixed params cannot fail
 	}
 	return encoded
 })
 
-// hashPassword encodes password as $argon2id$v=19$m=…,t=…,p=…$salt$key with a
-// fresh 16-byte salt. Must run under a limiter (64 MiB per call).
 func hashPassword(ctx context.Context, l *limiter, password string) (string, error) {
 	if err := l.acquire(ctx); err != nil {
 		return "", err
@@ -73,16 +66,13 @@ func hashPassword(ctx context.Context, l *limiter, password string) (string, err
 		base64.RawStdEncoding.EncodeToString(key)), nil
 }
 
-// verifyPassword compares a plaintext password against an encoded argon2id
-// string in constant time (constant-time compare on derived keys). Malformed
-// encodings fail closed (ErrPasswordMismatch).
+// verifyPassword compares in constant time; malformed encodings fail closed.
 func verifyPassword(ctx context.Context, l *limiter, encoded, password string) error {
 	if err := l.acquire(ctx); err != nil {
 		return err
 	}
 	defer l.release()
 	parts := strings.Split(encoded, "$")
-	// $argon2id$v=19$m=...,t=...,p=...$salt$key
 	if len(parts) != 6 || parts[1] != "argon2id" {
 		return ErrPasswordMismatch
 	}

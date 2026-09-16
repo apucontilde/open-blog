@@ -2,9 +2,8 @@ package authz
 
 import "fmt"
 
-// Role is a tenant membership's privilege level, ordered author < editor <
-// admin < owner. The DB stores it as text with a CHECK constraint; ordering
-// and derivation live exclusively here.
+// Role is ordered author < editor < admin < owner; the DB stores it as
+// CHECK-constrained text and both ordering and derivation live here only.
 type Role int
 
 const (
@@ -27,7 +26,6 @@ func (r Role) String() string {
 	}
 }
 
-// ParseRole maps the DB CHECK-constrained text back to a Role.
 func ParseRole(s string) (Role, error) {
 	switch s {
 	case "author":

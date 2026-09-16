@@ -220,8 +220,6 @@ func (f *pubFixture) version(t *testing.T, tenantID uuid.UUID) int64 {
 	return v
 }
 
-// ---- tests ----
-
 func TestDraftInvisible(t *testing.T) {
 	f := newPubFixture(t)
 	_ = f.createDraft(t, f.svcA, f.actorA(), "draft-post", "Draft")
@@ -310,7 +308,7 @@ func TestPaginationOrder(t *testing.T) {
 			fmt.Sprintf("content %d", i),
 		)
 	}
-	// publish sets published_at=now(); ties possible → query DB for actual order
+	// publish sets published_at=now(); ties possible → query DB for actual order.
 	expected := queryPublishedOrder(t, f.db, f.tA)
 	if len(expected) != 7 {
 		t.Fatalf("expected len = %d, want 7", len(expected))
@@ -340,9 +338,8 @@ func TestPaginationOrder(t *testing.T) {
 	// walk remaining pages
 	cursor := lb.NextCursor
 	for i := 1; i < 3; i++ {
-		// json.Unmarshal never resets fields absent from the payload, so each
-		// page must decode into a fresh envelope or a trailing next_cursor from
-		// the previous page would survive the final (cursor-less) response.
+		// json.Unmarshal never resets fields absent from the payload, so decode
+		// each page into a fresh envelope or a stale next_cursor would survive.
 		var page listBody
 		req = httptest.NewRequest("GET", "/public/alpha/posts?before="+cursor, nil)
 		resp, _ = api.List(req, "alpha")
@@ -601,8 +598,6 @@ func TestMalformedCursor422(t *testing.T) {
 		t.Fatalf("status = %d, want 422", resp.Status)
 	}
 }
-
-// helpers
 
 func queryPublishedOrder(t *testing.T, d *pubDB, tenantID uuid.UUID) []string {
 	t.Helper()

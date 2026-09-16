@@ -17,11 +17,10 @@ const (
 	maxOutputBytes    = 2 << 20 // 2 MiB
 )
 
-// converter converts raw document bytes to markdown, reporting a fidelity
-// level ("high", "medium") or an error.
+// converter returns markdown and a fidelity level ("high" or "medium").
 type converter func(ctx context.Context, src []byte) (md []byte, fidelity string, err error)
 
-// Command and HTTP seams for testability — tests inject fakes.
+// Command and HTTP seams; tests inject fakes.
 var (
 	newCmd   = func(name string, args ...string) *exec.Cmd { return exec.Command(name, args...) }
 	lookPath = exec.LookPath
@@ -32,7 +31,7 @@ var (
 func dispatch(format string) (converter, bool) {
 	switch format {
 	case "docx", "odt", "rtf", "html", "md":
-		return pandoc, true
+		return pandocFor(format), true
 	case "pdf":
 		return pdftotext, true
 	default:
@@ -40,10 +39,18 @@ func dispatch(format string) (converter, bool) {
 	}
 }
 
-// pandoc runs pandoc --wrap=none -f <format> -t markdown with a 10 s timeout
-// and a 2 MiB output cap. The binary must be on PATH (container-pinned;
-// exec.LookPath failure → error with a setup hint).
-func pandoc(ctx context.Context, src []byte) ([]byte, string, error) {
+// pandocFor binds pandoc to the source format so it parses the real input type.
+func pandocFor(format string) converter {
+	return func(ctx context.Context, src []byte) ([]byte, string, error) {
+		return runPandoc(ctx, format, src)
+	}
+}
+
+// runPandoc converts from the named source format with a 10s timeout and 2 MiB output cap; a missing binary is a setup error with a hint.
+func runPandoc(ctx context.Context, from string, src []byte) ([]byte, string, error) {
+	if from == "md" {
+		from = "markdown"
+	}
 	pandocPath, err := lookPath("pandoc")
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: pandoc not found; install pandoc or add to PATH", err)
@@ -51,7 +58,7 @@ func pandoc(ctx context.Context, src []byte) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, conversionTimeout)
 	defer cancel()
 
-	cmd := newCmd(pandocPath, "--wrap=none", "-f", "markdown", "-t", "markdown")
+	cmd := newCmd(pandocPath, "--wrap=none", "-f", from, "-t", "markdown")
 	cmd.Stdin = bytes.NewReader(src)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -72,8 +79,7 @@ func pandoc(ctx context.Context, src []byte) ([]byte, string, error) {
 	return stdout.Bytes(), "high", nil
 }
 
-// pdftotext runs pdftotext -layout and applies a basic heading heuristic.
-// Fidelity is "medium" with a warning.
+// pdftotext runs pdftotext -layout; fidelity is "medium".
 func pdftotext(ctx context.Context, src []byte) ([]byte, string, error) {
 	pdftotextPath, err := lookPath("pdftotext")
 	if err != nil {
@@ -108,8 +114,7 @@ func pdftotext(ctx context.Context, src []byte) ([]byte, string, error) {
 	return text, "medium", nil
 }
 
-// isScannedPDF is a heuristic: very short output or dominated by PDF
-// structural markers means no real text layer.
+// isScannedPDF treats very short or structural-marker-dominated output as having no text layer.
 func isScannedPDF(text []byte) bool {
 	trimmed := strings.TrimSpace(string(text))
 	if len(trimmed) < 50 {
@@ -126,9 +131,7 @@ func isScannedPDF(text []byte) bool {
 	return metaCount > len(lines)*3/4
 }
 
-// gdocExport fetches the Google Doc as DOCX via the Drive v3 export endpoint,
-// then converts via pandoc. Token absence/expiry returns ErrGoogleToken (401
-// class — re-consent source for 010 to surface).
+// gdocExport fetches the Doc as DOCX via the Drive v3 export endpoint then converts via pandoc; 401/403 → ErrGoogleToken.
 func gdocExport(ctx context.Context, docID, accessToken string) ([]byte, string, error) {
 	exportURL := fmt.Sprintf(
 		"https://www.googleapis.com/drive/v3/files/%s/export?mimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -160,5 +163,5 @@ func gdocExport(ctx context.Context, docID, accessToken string) ([]byte, string,
 		return nil, "", fmt.Errorf("gdoc: exported DOCX exceeds %d bytes", maxOutputBytes)
 	}
 
-	return pandoc(ctx, body)
+	return runPandoc(ctx, "docx", body)
 }

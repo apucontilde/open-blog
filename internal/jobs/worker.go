@@ -32,7 +32,6 @@ type JobPayload struct {
 	Data     json.RawMessage `json:"data,omitempty"`
 }
 
-// Job is a claimed row from the jobs table.
 type Job struct {
 	ID      uuid.UUID
 	Kind    string
@@ -57,19 +56,14 @@ func New(pool *pgxpool.Pool) *Worker {
 	}
 }
 
-// Register binds a handler for kind. The registry is locked at claim time, so
-// handlers must be registered before Run is called.
+// Register binds a handler for kind; handlers must be registered before Run.
 func (w *Worker) Register(kind string, fn Handler) {
 	w.mu.Lock()
 	w.handlers[kind] = fn
 	w.mu.Unlock()
 }
 
-// Run derives an internal, cancellable context from ctx, starts n worker
-// goroutines plus one sweeper goroutine, and blocks until that context is
-// cancelled and every in-flight handler has drained (graceful shutdown: no
-// new claims are taken once cancellation fires, running handlers run to
-// completion or observe the cancellation).
+// Run starts n workers plus a sweeper and blocks until cancellation and drain.
 func (w *Worker) Run(ctx context.Context, n int) {
 	w.once.Do(func() {
 		w.ctx, w.cancel = context.WithCancel(ctx)
@@ -89,8 +83,7 @@ func (w *Worker) Run(ctx context.Context, n int) {
 	w.wg.Wait()
 }
 
-// Close cancels the internal context driving Run: workers stop claiming and
-// in-flight handlers drain before Run returns. Safe to call before Run.
+// Close cancels the context driving Run; safe to call before Run.
 func (w *Worker) Close() {
 	w.once.Do(func() {
 		w.ctx, w.cancel = context.WithCancel(context.Background())
@@ -138,12 +131,9 @@ func (w *Worker) worker(ctx context.Context) {
 	}
 }
 
-// ErrNoJob reports an empty queue (claim found nothing to run).
 var ErrNoJob = errors.New("jobs: no job available")
 
-// claim flips one queued job to running under a 180s lease in a short
-// transaction. FOR UPDATE SKIP LOCKED keeps concurrent claimers disjoint, so
-// a job is never claimed twice. attempts counts RUNS, not claims.
+// claim takes one due job with FOR UPDATE SKIP LOCKED; attempts counts runs, not claims.
 func (w *Worker) claim(ctx context.Context) (Job, error) {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
@@ -187,8 +177,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) {
 	handler, ok := w.handlers[job.Kind]
 	w.mu.RUnlock()
 	if !ok {
-		// Unknown kind is a deployment bug, not a transient condition: fail
-		// the job immediately rather than burning the retry budget.
+		// Unknown kind is a deployment bug: fail immediately, don't retry.
 		sctx, scancel := stateCtx()
 		defer scancel()
 		w.markFailed(sctx, job, errors.New("jobs: no handler registered for kind "+job.Kind))
@@ -214,13 +203,11 @@ func (w *Worker) done(ctx context.Context, job Job) {
 	}
 }
 
-// stateCtx returns a short-lived context detached from the worker's shutdown
-// cancellation: final state transitions must always land even mid-drain.
+// stateCtx detaches final state transitions from the shutdown cancellation.
 func stateCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 15*time.Second)
 }
 
-// markFailed permanently fails a job, keeping last_err for ops.
 func (w *Worker) markFailed(ctx context.Context, job Job, err error) {
 	if _, execErr := w.pool.Exec(ctx,
 		"update jobs set state = 'failed', last_err = $2, updated_at = now() where id = $1",
@@ -229,9 +216,7 @@ func (w *Worker) markFailed(ctx context.Context, job Job, err error) {
 	}
 }
 
-// fail records the outcome of a failed run: attempts >= MaxAttempts moves the
-// job to failed with last_err kept for ops; otherwise it requeues with
-// run_after pushed out by an exponential backoff (base 1s x2, capped at 1h).
+// fail moves the job to failed at MaxAttempts, else requeues with 1s x2 backoff capped at 1h.
 func (w *Worker) fail(job Job, err error) {
 	sctx, scancel := stateCtx()
 	defer scancel()
@@ -257,8 +242,6 @@ func (w *Worker) fail(job Job, err error) {
 	}
 }
 
-// computeBackoff returns base * 2^(attempts-1), capped at maxBackoff.
-// attempts=1 => 1s, 2 => 2s, 3 => 4s, 4 => 8s, capped at 1h.
 func computeBackoff(attempts int) time.Duration {
 	d := float64(baseBackoff) * math.Pow(2, float64(attempts-1))
 	if d > float64(maxBackoff) {
@@ -267,9 +250,7 @@ func computeBackoff(attempts int) time.Duration {
 	return time.Duration(d)
 }
 
-// sweeper periodically requeues expired leases (crash recovery; attempts are
-// untouched, so the retry budget stays a run budget) and runs the TTL
-// cleanups. Tables are unscoped, so these run at store level.
+// sweeper requeues expired leases without burning attempts and runs the TTL cleanups.
 func (w *Worker) sweeper(ctx context.Context) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
@@ -290,15 +271,13 @@ func (w *Worker) sweep(ctx context.Context) {
 		slog.Error("jobs: lease sweep failed", "err", err)
 	}
 
-	// sessions: expiry + 7d grace.
 	if _, err := w.pool.Exec(ctx,
 		"delete from sessions where expires_at < now() - interval '7 days'"); err != nil {
 		slog.Error("jobs: session cleanup failed", "err", err)
 	}
 
-	// oauth_flows: past expiry (table arrives with plan 003).
 	if _, err := w.pool.Exec(ctx,
 		"delete from oauth_flows where expires_at < now()"); err != nil {
-		slog.Debug("jobs: oauth_flows cleanup skipped", "err", err) // table may not exist yet
+		slog.Debug("jobs: oauth_flows cleanup skipped", "err", err)
 	}
 }

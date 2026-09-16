@@ -12,11 +12,9 @@ import (
 	"time"
 )
 
-// R2Client is a lean HTTP client against the R2 S3-compatible endpoint for
-// the worker's read-original / PUT-variants round trips. Requests are signed
-// with SigV4 Authorization headers (same hand-rolled machinery as the
-// presigner; no AWS SDK). The worker is the only caller — bytes flow R2 →
-// Go → R2, never through the request path.
+// R2Client is the worker's SigV4 HTTP client against the R2 S3 endpoint (read
+// original, PUT variants); bytes flow R2 → Go → R2, never through the request
+// path.
 type R2Client struct {
 	endpoint  string
 	bucket    string
@@ -25,7 +23,6 @@ type R2Client struct {
 	http      *http.Client
 }
 
-// NewR2Client builds the worker-side R2 client from the same Config fields.
 func NewR2Client(cfg Config) *R2Client {
 	return &R2Client{
 		endpoint:  cfg.Endpoint,
@@ -36,7 +33,6 @@ func NewR2Client(cfg Config) *R2Client {
 	}
 }
 
-// Get downloads the object at key.
 func (c *R2Client) Get(ctx context.Context, key string) ([]byte, error) {
 	u := c.objectURL(key)
 	body := []byte{}
@@ -56,7 +52,6 @@ func (c *R2Client) Get(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// Put uploads data to key.
 func (c *R2Client) Put(ctx context.Context, key string, data []byte) error {
 	u := c.objectURL(key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(data))
@@ -94,7 +89,6 @@ func signV4(req *http.Request, accessKey, secretKey string, body []byte) {
 	req.Header.Set("x-amz-content-sha256", payloadHash)
 	req.Header.Set("host", req.URL.Host)
 
-	// Canonical request without a query string (this client never signs one).
 	canonicalURI := req.URL.EscapedPath()
 	if canonicalURI == "" {
 		canonicalURI = "/"

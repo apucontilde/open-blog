@@ -16,14 +16,12 @@ import (
 
 const defaultMediaOrigin = "media.example.com"
 
-// renderer turns markdown into stored content_html: GFM (fenced code, tables,
-// strikethrough, task lists), autolinks, server-side chroma highlighting
-// (fenced blocks only), then sanitization of the resulting HTML to a fixed
-// element allow-list. Output is deterministic: nothing here depends on the
-// clock, random state, or an external process.
+// renderer converts markdown to stored content_html: GFM + chroma highlighting
+// on fenced code only, then sanitization to a fixed element allow-list. Output
+// is deterministic (no clock, random state, or external process).
 type renderer struct {
 	md       goldmark.Markdown
-	imgHosts []string // image host allow-list; empty => any http(s) image (metadata opt-in)
+	imgHosts []string // exact host allow-list; nil => any http(s) host (metadata opt-in)
 }
 
 func newRenderer(imgHosts []string) renderer {
@@ -34,9 +32,8 @@ func newRenderer(imgHosts []string) renderer {
 				extension.Linkify,
 				highlighting.NewHighlighting(highlighting.WithStyle("github")),
 			),
-			// WithUnsafe lets author raw HTML reach the sanitizer so it is the
-			// single gate; without it goldmark would silently drop raw HTML
-			// before sanitization and the golden parity would diverge.
+			// Raw author HTML must reach the sanitizer, the single gate;
+			// without WithUnsafe goldmark drops it and golden parity diverges.
 			goldmark.WithRendererOptions(gmdhtml.WithUnsafe()),
 		),
 		imgHosts: imgHosts,
@@ -51,27 +48,23 @@ func (r renderer) render(src []byte) ([]byte, error) {
 	return sanitize(buf.Bytes(), r.imgHosts), nil
 }
 
-// renderGFM is the canonical render-on-publish entry point — the golden-test
-// surface for the plan's renderer contract: GFM -> sanitized HTML with images
-// restricted to media.example.com.
+// renderGFM is the canonical render entry point: images restricted to media.example.com.
 func renderGFM(md []byte) ([]byte, error) {
 	return renderGFMHosts(md, []string{defaultMediaOrigin})
 }
 
-// renderGFMHosts renders with an explicit image-host policy: a non-empty hosts
-// list is an exact allow-list; an empty list allows any http(s) image (the
-// "metadata opts in otherwise" path, 005).
+// renderGFMHosts: a non-empty imgHosts is an exact allow-list; nil allows any
+// http(s) image.
 func renderGFMHosts(md []byte, imgHosts []string) ([]byte, error) {
 	return newRenderer(imgHosts).render(md)
 }
 
-// sanitize filters rendered HTML against the fixed element/attribute allow-list
-// and the image-host policy. It is defense-in-depth on top of goldmark: every
-// render path funnels through here, raw author HTML included (WithUnsafe).
+// sanitize filters rendered HTML against the element/attribute allow-list and
+// image-host policy; the single gate for every render path, raw HTML included.
 func sanitize(in []byte, imgHosts []string) []byte {
 	doc, err := nethtml.Parse(bytes.NewReader(in))
 	if err != nil {
-		return nil // fail closed: nothing unsanitized escapes
+		return nil // fail closed
 	}
 	out := &nethtml.Node{Type: nethtml.ElementNode, Data: "div"}
 	for c := documentBody(doc).FirstChild; c != nil; c = c.NextSibling {
@@ -82,7 +75,6 @@ func sanitize(in []byte, imgHosts []string) []byte {
 		return nil
 	}
 	s := buf.String()
-	// Render wraps in the container div; the fragment is its children.
 	return []byte(s[len("<div>") : len(s)-len("</div>")])
 }
 
@@ -137,21 +129,20 @@ func appendSanitized(parent, n *nethtml.Node, imgHosts []string) {
 		return
 	}
 	if n.Type != nethtml.ElementNode {
-		return // comments, doctypes and meta dropped
+		return
 	}
 	tag := n.Data
 	if dangerousTags[tag] {
-		return // drop the whole subtree
+		return // drop the subtree
 	}
 	if !allowedTags[tag] {
-		// unwrap: keep the (sanitized) content, lose the wrapper
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			appendSanitized(parent, c, imgHosts)
 		}
 		return
 	}
 	if tag == "img" && !imgSrcAllowed(n.Attr, imgHosts) {
-		return // rejected image (data:/javascript:/off-origin): drop it whole
+		return // rejected image: drop whole, not unwrap
 	}
 	e := &nethtml.Node{Type: nethtml.ElementNode, Data: tag, DataAtom: n.DataAtom}
 	for _, a := range n.Attr {
@@ -178,7 +169,7 @@ func allowedAttr(tag, key, val string) bool {
 	case "img":
 		switch key {
 		case "src":
-			return safeImageURL(val) // host policy handled by imgSrcAllowed
+			return safeImageURL(val)
 		case "alt", "title":
 			return true
 		case "width", "height":
@@ -206,9 +197,9 @@ func allowedAttr(tag, key, val string) bool {
 		}
 	case "th", "td":
 		switch key {
-		case "align": // GFM table alignment attribute (XHTML path)
+		case "align": // GFM table alignment (XHTML path)
 			return val == "left" || val == "center" || val == "right" || val == "justify" || val == "char"
-		case "style": // GFM table alignment (HTML5 path): text-align:xxx
+		case "style": // GFM table alignment (HTML5 path)
 			return safeStyle(val)
 		case "rowspan", "colspan":
 			return digitsRe.MatchString(val)
@@ -298,9 +289,8 @@ func classOK(s string) bool {
 	return s != "" && len(s) <= 256 && classRe.MatchString(s)
 }
 
-// safeStyle validates chroma-generated inline styles (the only style source in
-// rendered output): each declaration is a whitelisted property with a bare
-// value — no parentheses (url()/var()), quotes, slashes, or control chars.
+// safeStyle allows only whitelisted properties with bare values (no url()/var(),
+// quotes, slashes, or control chars).
 func safeStyle(s string) bool {
 	if s == "" || len(s) > 512 {
 		return false

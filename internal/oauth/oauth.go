@@ -1,7 +1,3 @@
-// Package oauth implements the SSO service layer (plan 003): Google/GitHub
-// authorization-code + PKCE flows bound to the initiating session, identity
-// linking on verified mailbox control, atomic invitation consumption, and
-// AEAD-encrypted token-at-rest for the later Google import scope (plan 007).
 package oauth
 
 import (
@@ -21,30 +17,22 @@ import (
 )
 
 const (
-	// ProviderGoogle and ProviderGitHub are the flow identifiers stored in
-	// oauth_flows.provider / oauth_tokens.provider.
 	ProviderGoogle = "google"
 	ProviderGitHub = "github"
 
-	// GoogleDriveReadonly is the scope granted ad hoc at the first Google
-	// import (007) and recorded in oauth_tokens.token_scopes; GetGoogleToken
-	// gates its reuse on that recorded grant.
+	// GoogleDriveReadonly is granted lazily at the first Google import and gated by token_scopes on reuse.
 	GoogleDriveReadonly = "https://www.googleapis.com/auth/drive.readonly"
 
-	// flowTTL bounds how long a started login may sit before the callback.
 	flowTTL = 15 * time.Minute
 
-	// refreshMargin is how early a stored access token is treated as expired,
-	// absorbing clock skew between us and the IdP.
+	// refreshMargin absorbs clock skew when deciding a stored token is expired.
 	refreshMargin = 30 * time.Second
 )
 
-// Errors map to 010 responses; ErrInvalidFlow, ErrProviderDenied,
-// ErrUnverifiedEmail, ErrScopeMissing and ErrRefreshFailed are 401-class.
 var (
 	ErrUnknownProvider    = errors.New("oauth: unknown provider")
 	ErrDisallowedRedirect = errors.New("oauth: redirect is not on the allow-list")
-	ErrInvalidFlow        = errors.New("oauth: unknown, expired, or replayed flow state") // → 401, zero IdP traffic
+	ErrInvalidFlow        = errors.New("oauth: unknown, expired, or replayed flow state")
 	ErrProviderDenied     = errors.New("oauth: identity provider denied the request")
 	ErrExchangeFailed     = errors.New("oauth: token exchange failed")
 	ErrIdentityClaims     = errors.New("oauth: could not fetch identity claims")
@@ -59,9 +47,7 @@ var (
 	errDecrypt = errors.New("oauth: failed to decrypt stored token")
 )
 
-// ProviderConfig carries one IdP's credentials. Empty endpoint URLs fall back
-// to the public Google/GitHub endpoints; the RedirectURL is our fixed callback
-// endpoint registered with the IdP.
+// ProviderConfig holds one IdP's credentials; empty endpoints use the public URLs.
 type ProviderConfig struct {
 	ClientID     string
 	ClientSecret string
@@ -72,7 +58,6 @@ type ProviderConfig struct {
 	Scopes       []string
 }
 
-// Config is the typed construction input; 010 parses env into it.
 type Config struct {
 	Store    *store.DB
 	Sessions *auth.Auth
@@ -81,15 +66,14 @@ type Config struct {
 	Google ProviderConfig
 	GitHub ProviderConfig
 
-	// RedirectAllow is the scheme+host+path allow-list for the post-login
-	// `redirect` destination; anything else is rejected at Start.
+	// RedirectAllow is the scheme+host+path allow-list for the post-login redirect.
 	RedirectAllow []*url.URL
 
 	SessionTTL time.Duration // defaults to auth.TokenTTL
 	HTTPClient *http.Client
 }
 
-// OAuth is the SSO service. Safe for concurrent use.
+// OAuth is safe for concurrent use.
 type OAuth struct {
 	store     *store.DB
 	sessions  *auth.Auth
@@ -100,8 +84,7 @@ type OAuth struct {
 	newSource func(ctx context.Context, c *oauth2.Config, t *oauth2.Token) oauth2.TokenSource
 }
 
-// New validates Config and wires the two providers. Key must be 32 bytes:
-// AES-256, no weaker modes.
+// New validates Config and wires both providers; Key must be exactly 32 bytes.
 func New(cfg Config) (*OAuth, error) {
 	if len(cfg.Key) != 32 {
 		return nil, errors.New("oauth: key must be exactly 32 bytes (AES-256-GCM)")
@@ -126,7 +109,9 @@ func New(cfg Config) (*OAuth, error) {
 		allow:     cfg.RedirectAllow,
 		ttl:       cfg.SessionTTL,
 		providers: map[string]provider{},
-		newSource: realTokenSource,
+		newSource: func(ctx context.Context, c *oauth2.Config, t *oauth2.Token) oauth2.TokenSource {
+			return c.TokenSource(ctx, t)
+		},
 	}
 	if len(cfg.Google.Scopes) == 0 {
 		cfg.Google.Scopes = strings.Fields(googleLoginScopes)
@@ -167,10 +152,7 @@ func New(cfg Config) (*OAuth, error) {
 	return o, nil
 }
 
-// Start begins a login flow for provider: it persists an oauth_flows row bound
-// to the presented session token hash and returns the IdP consent URL (010
-// issues the 302). extraScopes are appended to the login scopes — the lazy
-// drive.readonly grant at the first Google import.
+// Start persists an oauth_flows row bound to sessionToken's hash and returns the consent URL.
 func (o *OAuth) Start(ctx context.Context, providerName, redirect, sessionToken string, extraScopes ...string) (string, error) {
 	p, ok := o.providers[providerName]
 	if !ok {
@@ -213,9 +195,6 @@ func (o *OAuth) Start(ctx context.Context, providerName, redirect, sessionToken 
 		oauth2.SetAuthURLParam("code_challenge_method", "S256")), nil
 }
 
-// CallbackResult is what a completed SSO login hands to 010: a fresh session
-// token (to set as cookie), the user it belongs to, and the allow-listed
-// post-login destination.
 type CallbackResult struct {
 	SessionToken string
 	UserID       uuid.UUID
@@ -223,12 +202,7 @@ type CallbackResult struct {
 	Provider     string
 }
 
-// Callback exchanges the authorization code for the flow identified by state,
-// verifies the flow's bound session in the same statement that consumes it,
-// resolves/link the identity, consumes a first-link invitation, stores the
-// AEAD-encrypted token pair, and issues the new session. Replay, expiry, or a
-// session mismatch return ErrInvalidFlow before any IdP call. A missing code
-// (IdP error/denial) consumes the flow and returns ErrProviderDenied.
+// Callback verifies and consumes the single-use flow against the bound session before any IdP call.
 func (o *OAuth) Callback(ctx context.Context, state, code, sessionToken string) (CallbackResult, error) {
 	var res CallbackResult
 	var flow store.OAuthFlow
@@ -275,11 +249,7 @@ func (o *OAuth) Callback(ctx context.Context, state, code, sessionToken string) 
 	return res, nil
 }
 
-// resolveIdentity maps claims to a users row inside one transaction: a known
-// (provider, subject) re-login returns its user unchanged; a brand-new
-// identity requires a verified mailbox to create a user or to join the
-// existing user for that email; the first verified link then consumes a
-// pending invitation and grants the invited membership atomically.
+// resolveIdentity links or returns the user, requiring a verified email for a new identity.
 func (o *OAuth) resolveIdentity(ctx context.Context, providerName string, c Claims) (uuid.UUID, error) {
 	email := normalizeEmail(c.Email)
 	var userID uuid.UUID
@@ -314,8 +284,6 @@ func (o *OAuth) resolveIdentity(ctx context.Context, providerName string, c Clai
 		if err := linkIdentityTx(ctx, q, userID, providerName, c.Subject); err != nil {
 			return err
 		}
-		// ST-19: consume the single live invitation for this verified email (if
-		// any) and grant the invited role; zero live invitations is not an error.
 		inv, err := q.ConsumePendingInvitation(ctx, email, nil)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -331,9 +299,7 @@ func (o *OAuth) resolveIdentity(ctx context.Context, providerName string, c Clai
 	return userID, nil
 }
 
-// storeOAuthToken encrypts the exchange result and upserts the pair. The
-// SQL-side merge preserves refresh tokens the IdP declined to rotate and union
-// of scopes across logins (lazy drive.readonly).
+// storeOAuthToken AEAD-encrypts and upserts the pair, preserving an unrotated refresh token.
 func (o *OAuth) storeOAuthToken(ctx context.Context, userID uuid.UUID, providerName string, tok *oauth2.Token) error {
 	encAccess, err := seal(o.key, []byte(tok.AccessToken))
 	if err != nil {
@@ -364,9 +330,7 @@ func (o *OAuth) storeOAuthToken(ctx context.Context, userID uuid.UUID, providerN
 	})
 }
 
-// isAllowedRedirect enforces the scheme+host+path allow-list: the host and
-// scheme must match exactly and the path must equal or descend from the
-// allowed base path. It is the guard against open redirects.
+// isAllowedRedirect enforces the scheme+host+path allow-list (open-redirect guard).
 func (o *OAuth) isAllowedRedirect(callbackURL string) bool {
 	u, err := url.Parse(callbackURL)
 	if err != nil || !u.IsAbs() || u.User != nil || u.Host == "" {
@@ -388,11 +352,6 @@ func (o *OAuth) isAllowedRedirect(callbackURL string) bool {
 	return false
 }
 
-// realTokenSource is the production refresher plumbing for GetGoogleToken.
-func realTokenSource(ctx context.Context, c *oauth2.Config, t *oauth2.Token) oauth2.TokenSource {
-	return c.TokenSource(ctx, t)
-}
-
 func orDefault(given, fallback string) string {
 	if given == "" {
 		return fallback
@@ -400,8 +359,7 @@ func orDefault(given, fallback string) string {
 	return given
 }
 
-// normalizeEmail is the single lowercase-on-write rule for verified emails
-// (sweep finding 18).
+// normalizeEmail lowercases and trims verified emails before any write.
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
@@ -416,8 +374,6 @@ func displayName(c Claims, email string) string {
 	return email
 }
 
-// mergeScopes returns base plus any extra not already present, preserving
-// order; used to build the augmented drive.readonly consent URL.
 func mergeScopes(base, extra []string) []string {
 	seen := make(map[string]bool, len(base)+len(extra))
 	out := make([]string, 0, len(base)+len(extra))
@@ -431,7 +387,6 @@ func mergeScopes(base, extra []string) []string {
 	return out
 }
 
-// scopeSet maps a comma-joined token_scopes value for O(1) membership checks.
 func scopeSet(joined string) map[string]bool {
 	m := map[string]bool{}
 	for _, s := range strings.Split(joined, ",") {
@@ -442,10 +397,7 @@ func scopeSet(joined string) map[string]bool {
 	return m
 }
 
-// grantedScopes records what the IdP granted, comma-joined for token_scopes.
-// Google echoes granted scopes in the token response (they include the
-// ad-hoc drive.readonly); GitHub grants exactly what we requested, so the
-// config's scope set is authoritative there.
+// grantedScopes is Google's echoed scope set, or the configured scopes for GitHub.
 func grantedScopes(providerName string, tok *oauth2.Token, conf *oauth2.Config) string {
 	if providerName == ProviderGoogle {
 		if s, ok := tok.Extra("scope").(string); ok && s != "" {

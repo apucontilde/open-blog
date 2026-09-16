@@ -10,23 +10,16 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Queries is a thin, explicit query handle over one scoped transaction:
-// handwritten SQL that returns domain types, with no ORM or generated model
-// layer. RLS sees exactly the tuples each statement touches.
 type Queries struct {
 	tx pgx.Tx
 }
 
-// Tx exposes the underlying pgx transaction so co-owned modules can enqueue
-// jobs inside the same transaction (008 sweep: enqueue-in-tx).
+// Tx lets co-owned modules enqueue jobs in the same transaction.
 func (q *Queries) Tx() pgx.Tx { return q.tx }
 
-// NewQueries wraps an existing pgx transaction for ad-hoc use by co-owned
-// modules and tests that manage their own transaction lifecycle.
 func NewQueries(tx pgx.Tx) *Queries { return &Queries{tx: tx} }
 
-// PostStatus mirrors the DB CHECK-constrained text values; the iota enum owns
-// ordering/authz semantics, the parser maps it to and from the wire.
+// PostStatus values mirror the DB post_status enum.
 type PostStatus uint8
 
 const (
@@ -59,8 +52,7 @@ func parsePostStatus(s string) (PostStatus, error) {
 	}
 }
 
-// Post is one row of posts. IDs are opaque and never ordered by; ordering is
-// by created_at / published_at / content_version.
+// Post is one row of posts; ordering is by created_at/published_at/content_version, never id.
 type Post struct {
 	ID              uuid.UUID
 	TenantID        uuid.UUID
@@ -80,10 +72,7 @@ type Post struct {
 const postColumns = `id, tenant_id, author_id, slug, title, excerpt, content_markdown,
 	content_html, status, published_at, metadata, created_at, updated_at`
 
-// CreatePost inserts a draft post. Insertion and visibility require the
-// caller's scope to match p.TenantID — RLS `with check` is the enforcement.
-// ContentHTML and Metadata are written through so a create renders once; a
-// nil Metadata falls back to the '{}' column default.
+// CreatePost writes rendered HTML/metadata through; nil Metadata falls back to '{}'; RLS with-check enforces tenant.
 func (q *Queries) CreatePost(ctx context.Context, p Post) (Post, error) {
 	row := q.tx.QueryRow(ctx, `
 		insert into posts (id, tenant_id, author_id, slug, title, excerpt, content_markdown, content_html, metadata)
@@ -93,8 +82,6 @@ func (q *Queries) CreatePost(ctx context.Context, p Post) (Post, error) {
 	return scanPost(row)
 }
 
-// ListPosts returns every post the current scope may read: the scoped tenant's
-// rows, or all rows under a platform scope, and none under a nil tenant.
 func (q *Queries) ListPosts(ctx context.Context) ([]Post, error) {
 	rows, err := q.tx.Query(ctx, `select `+postColumns+` from posts`)
 	if err != nil {
@@ -129,8 +116,7 @@ func scanPost(row pgx.Row) (Post, error) {
 	return p, nil
 }
 
-// CreatePostImage attaches an image row to a post. The composite
-// (tenant_id, post_id) FK rejects cross-tenant attachment.
+// CreatePostImage attaches an image row; the composite (tenant_id, post_id) FK rejects cross-tenant attach.
 func (q *Queries) CreatePostImage(ctx context.Context, id, tenantID, postID uuid.UUID, r2Key, url string, width, height int, sizeBytes int64, mimeType string) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into post_images (id, tenant_id, post_id, r2_key, url, width, height, size_bytes, mime_type)
@@ -139,8 +125,7 @@ func (q *Queries) CreatePostImage(ctx context.Context, id, tenantID, postID uuid
 	return err
 }
 
-// PostImage is one post_images row. Width/height/variants are populated
-// server-side by the variants worker after decode.
+// PostImage is one post_images row; width/height/variants are set by the worker after decode.
 type PostImage struct {
 	ID        uuid.UUID
 	TenantID  uuid.UUID
@@ -157,11 +142,7 @@ type PostImage struct {
 
 const postImageColumns = `id, tenant_id, post_id, r2_key, url, width, height, size_bytes, mime_type, variants, created_at`
 
-// InsertPostImageOnConflict inserts a post_images row, treating a duplicate
-// (tenant_id, r2_key) as a 0-row no-op — confirm is idempotent (sweep
-// finding 23). Width/height start at 0: the worker records them after decode.
-// The composite FK (tenant_id, post_id) → posts(tenant_id, id) rejects
-// attaching the image to another tenant's post even under a platform scope.
+// InsertPostImageOnConflict makes a duplicate (tenant_id, r2_key) a 0-row no-op; composite FK rejects cross-tenant attach.
 func (q *Queries) InsertPostImageOnConflict(ctx context.Context, id, tenantID, postID uuid.UUID, r2Key, url, mimeType string, sizeBytes int64) (int64, error) {
 	tag, err := q.tx.Exec(ctx, `
 		insert into post_images (id, tenant_id, post_id, r2_key, url, width, height, size_bytes, mime_type)
@@ -171,28 +152,21 @@ func (q *Queries) InsertPostImageOnConflict(ctx context.Context, id, tenantID, p
 	return tag.RowsAffected(), err
 }
 
-// GetPostImageByID reads one post_images row under the ambient scope.
 func (q *Queries) GetPostImageByID(ctx context.Context, id uuid.UUID) (PostImage, error) {
 	row := q.tx.QueryRow(ctx, "select "+postImageColumns+" from post_images where id = $1", id)
 	return scanPostImage(row)
 }
 
-// GetPostImageByR2Key reads the row for an object key under the ambient scope
-// (the scope itself confines the read to the tenant the key belongs to).
 func (q *Queries) GetPostImageByR2Key(ctx context.Context, r2Key string) (PostImage, error) {
 	row := q.tx.QueryRow(ctx, "select "+postImageColumns+" from post_images where r2_key = $1", r2Key)
 	return scanPostImage(row)
 }
 
-// DeletePostImage removes one post_images row; orphaned R2 objects are
-// reclaimed by the sweeper, not here.
 func (q *Queries) DeletePostImage(ctx context.Context, id uuid.UUID) error {
 	_, err := q.tx.Exec(ctx, "delete from post_images where id = $1", id)
 	return err
 }
 
-// UpdatePostImageVariants records the worker's output: the decoded original
-// dimensions and the canonical variants jsonb. Scoped to the row by RLS.
 func (q *Queries) UpdatePostImageVariants(ctx context.Context, id uuid.UUID, width, height int, variants []byte) error {
 	_, err := q.tx.Exec(ctx, `
 		update post_images set width = $2, height = $3, variants = $4
@@ -201,14 +175,12 @@ func (q *Queries) UpdatePostImageVariants(ctx context.Context, id uuid.UUID, wid
 	return err
 }
 
-// GetPostByID reads one post row under the ambient scope.
 func (q *Queries) GetPostByID(ctx context.Context, id uuid.UUID) (Post, error) {
 	row := q.tx.QueryRow(ctx, "select "+postColumns+" from posts where id = $1", id)
 	return scanPost(row)
 }
 
-// PostSummary is the list projection of posts: metadata and slug only, no
-// markdown body (005: the list path never reads content_html).
+// PostSummary is the list projection: no markdown/html body.
 type PostSummary struct {
 	ID          uuid.UUID
 	TenantID    uuid.UUID
@@ -221,9 +193,6 @@ type PostSummary struct {
 	CreatedAt   time.Time
 }
 
-// ListPostSummaries projects the list view under the ambient scope, optionally
-// filtered by status and author (a nil filter is open). Ordering is stable:
-// published_at/created_at desc with id as the tiebreaker.
 func (q *Queries) ListPostSummaries(ctx context.Context, status *string, authorID *uuid.UUID) ([]PostSummary, error) {
 	rows, err := q.tx.Query(ctx, `
 		select id, tenant_id, author_id, slug, title, excerpt, status, published_at, created_at
@@ -252,9 +221,7 @@ func (q *Queries) ListPostSummaries(ctx context.Context, status *string, authorI
 	return ps, rows.Err()
 }
 
-// UpdatePost rewrites the mutable fields (title, slug, excerpt, markdown and
-// the re-rendered content_html); updated_at is bumped by the DB. Slug
-// immutability once published is enforced by the caller (005).
+// UpdatePost rewrites the mutable fields and re-rendered HTML; slug immutability once published is the caller's job.
 func (q *Queries) UpdatePost(ctx context.Context, p Post) (Post, error) {
 	row := q.tx.QueryRow(ctx, `
 		update posts set
@@ -267,10 +234,7 @@ func (q *Queries) UpdatePost(ctx context.Context, p Post) (Post, error) {
 	return scanPost(row)
 }
 
-// SetPostStatus transitions a post to status with an explicitly supplied
-// published_at (now() on publish, nil on unpublish/archive) and the freshly
-// re-rendered content_html; every lifecycle transition re-renders (005 sweep
-// resolution Q1). updated_at is bumped by the DB.
+// SetPostStatus transitions status with an explicit published_at and freshly re-rendered HTML.
 func (q *Queries) SetPostStatus(ctx context.Context, id uuid.UUID, status PostStatus, publishedAt *time.Time, contentHTML string) (Post, error) {
 	row := q.tx.QueryRow(ctx, `
 		update posts set status = $2, published_at = $3, content_html = $4, updated_at = now()
@@ -280,8 +244,7 @@ func (q *Queries) SetPostStatus(ctx context.Context, id uuid.UUID, status PostSt
 	return scanPost(row)
 }
 
-// BumpContentVersion increments tenants.content_version — the ETag anchor for
-// public-visible changes (005/009 sweep finding 6) — and returns the new value.
+// BumpContentVersion increments tenants.content_version (the public-visible-change ETag anchor) and returns it.
 func (q *Queries) BumpContentVersion(ctx context.Context, tenantID uuid.UUID) (int64, error) {
 	var v int64
 	err := q.tx.QueryRow(ctx, `
@@ -291,8 +254,6 @@ func (q *Queries) BumpContentVersion(ctx context.Context, tenantID uuid.UUID) (i
 	return v, err
 }
 
-// SlugExists reports whether a slug is taken inside the tenant, a cheap probe
-// of the unique (tenant_id, slug) constraint.
 func (q *Queries) SlugExists(ctx context.Context, tenantID uuid.UUID, slug string) (bool, error) {
 	var exists bool
 	err := q.tx.QueryRow(ctx,
@@ -301,9 +262,7 @@ func (q *Queries) SlugExists(ctx context.Context, tenantID uuid.UUID, slug strin
 	return exists, err
 }
 
-// DeletePost removes one post row: post_images cascade, imports.post_id is set
-// NULL so the same source can be re-imported. RLS confines the delete to rows
-// visible to the ambient scope.
+// DeletePost removes one post: images cascade, imports.post_id is set NULL so the source can be re-imported.
 func (q *Queries) DeletePost(ctx context.Context, id uuid.UUID) error {
 	_, err := q.tx.Exec(ctx, "delete from posts where id = $1", id)
 	return err
@@ -318,8 +277,7 @@ func scanPostImage(row pgx.Row) (PostImage, error) {
 	return im, nil
 }
 
-// CreateImport records a conversion job for sourceKey; postID may be nil before
-// the converted post exists. Same composite-FK guard as CreatePostImage.
+// CreateImport records a conversion job; postID is nil before Apply, and the composite FK blocks cross-tenant attach.
 func (q *Queries) CreateImport(ctx context.Context, id, tenantID, userID uuid.UUID, postID *uuid.UUID, sourceFormat, sourceKey string) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into imports (id, tenant_id, user_id, post_id, source_format, source_key)
@@ -328,15 +286,13 @@ func (q *Queries) CreateImport(ctx context.Context, id, tenantID, userID uuid.UU
 	return err
 }
 
-// CreateTenant inserts an unscoped platform row. IDs are app-minted (uuid v7
-// by convention); the DDL default is a v4 safety fallback for tooling.
+// CreateTenant inserts an unscoped platform row; ids are app-minted v7 (the DDL default is a v4 tooling fallback).
 func (q *Queries) CreateTenant(ctx context.Context, id uuid.UUID, slug, name string) error {
 	_, err := q.tx.Exec(ctx,
 		"insert into tenants (id, slug, name) values ($1, $2, $3)", id, slug, name)
 	return err
 }
 
-// CreateUser inserts an unscoped identity row with a nullable password hash.
 func (q *Queries) CreateUser(ctx context.Context, id uuid.UUID, email, displayName string, passwordHash *string) error {
 	_, err := q.tx.Exec(ctx,
 		"insert into users (id, email, display_name, password_hash) values ($1, $2, $3, $4)",
@@ -344,8 +300,7 @@ func (q *Queries) CreateUser(ctx context.Context, id uuid.UUID, email, displayNa
 	return err
 }
 
-// AddMembership joins actorID to tenantID with role. memberships is unscoped
-// by design; role values are constrained by the DB CHECK.
+// AddMembership joins actorID to tenantID; memberships is unscoped by design and role is DB-CHECK'd.
 func (q *Queries) AddMembership(ctx context.Context, tenantID, userID uuid.UUID, role string) error {
 	_, err := q.tx.Exec(ctx,
 		"insert into memberships (tenant_id, user_id, role) values ($1, $2, $3)",
@@ -353,16 +308,13 @@ func (q *Queries) AddMembership(ctx context.Context, tenantID, userID uuid.UUID,
 	return err
 }
 
-// SetSuperAdmin sets or clears users.super_admin, the single platform-wide
-// flag backing Actor.Platform (plan 004). Identities are unscoped rows.
 func (q *Queries) SetSuperAdmin(ctx context.Context, userID uuid.UUID, on bool) error {
 	_, err := q.tx.Exec(ctx,
 		"update users set super_admin = $2 where id = $1", userID, on)
 	return err
 }
 
-// Session is one row of sessions. TokenHash is the sha256 of the opaque token
-// the client holds; the raw token never reaches the DB.
+// Session is one row of sessions; TokenHash is sha256 of the client token, so the raw token never reaches the DB.
 type Session struct {
 	TokenHash []byte
 	UserID    uuid.UUID
@@ -371,8 +323,6 @@ type Session struct {
 	CreatedAt time.Time
 }
 
-// InsertSession records a new session row. sessions is unscoped (platform
-// identity); the user_id FK rejects a zero/unknown user.
 func (q *Queries) InsertSession(ctx context.Context, s Session) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into sessions (token_hash, user_id, scope, expires_at)
@@ -381,7 +331,6 @@ func (q *Queries) InsertSession(ctx context.Context, s Session) error {
 	return err
 }
 
-// GetSessionByTokenHash is the single verify-path read: a PK hit on token_hash.
 func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash []byte) (Session, error) {
 	row := q.tx.QueryRow(ctx,
 		"select token_hash, user_id, scope, expires_at, created_at from sessions where token_hash = $1",
@@ -389,15 +338,12 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash []byte) (
 	return scanSession(row)
 }
 
-// DeleteSessionByTokenHash removes the row for the presented token (logout).
 func (q *Queries) DeleteSessionByTokenHash(ctx context.Context, tokenHash []byte) error {
 	_, err := q.tx.Exec(ctx,
 		"delete from sessions where token_hash = $1", tokenHash)
 	return err
 }
 
-// SetSessionScope updates the active-tenant scope of one session (ST-20);
-// scope may be nil to clear it.
 func (q *Queries) SetSessionScope(ctx context.Context, tokenHash []byte, scope *uuid.UUID) error {
 	tag, err := q.tx.Exec(ctx,
 		"update sessions set scope = $2 where token_hash = $1", tokenHash, scope)
@@ -418,7 +364,6 @@ func scanSession(row pgx.Row) (Session, error) {
 	return s, nil
 }
 
-// User is one row of users as seen by auth: email and password identity only.
 type User struct {
 	ID           uuid.UUID
 	Email        string
@@ -426,7 +371,7 @@ type User struct {
 	DisplayName  string
 }
 
-// GetUserByEmail resolves a user by lowercase email (the uniqueness key).
+// GetUserByEmail matches case-insensitively via the lower(email) unique index.
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	row := q.tx.QueryRow(ctx,
 		"select id, email, password_hash, display_name from users where lower(email) = lower($1)",
@@ -442,8 +387,6 @@ func scanUser(row pgx.Row) (User, error) {
 	return u, nil
 }
 
-// HasPendingInvitation reports whether a live (unconsumed) invitation exists
-// for the email. invitations is unscoped; the caller normalizes email.
 func (q *Queries) HasPendingInvitation(ctx context.Context, email string) (bool, error) {
 	var exists bool
 	err := q.tx.QueryRow(ctx, `
@@ -454,8 +397,6 @@ func (q *Queries) HasPendingInvitation(ctx context.Context, email string) (bool,
 	return exists, err
 }
 
-// InsertInvitation records a live invitation, pure-email (email set, token
-// nil) or role-baked (token set). Scoped to tenantID by the tenant FK.
 func (q *Queries) InsertInvitation(ctx context.Context, id, tenantID uuid.UUID, email *string, role string, tokenHash []byte, expiresAt time.Time) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into invitations (id, tenant_id, email, role, token_hash, expires_at)
@@ -464,8 +405,6 @@ func (q *Queries) InsertInvitation(ctx context.Context, id, tenantID uuid.UUID, 
 	return err
 }
 
-// ConsumeInvitationByEmail marks invitations for an email consumed (SSO
-// verified-email consumption; un-consumes are a no-op).
 func (q *Queries) ConsumeInvitationByEmail(ctx context.Context, email string) error {
 	_, err := q.tx.Exec(ctx,
 		"update invitations set consumed_at = now() where lower(email) = lower($1) and consumed_at is null",
@@ -473,8 +412,7 @@ func (q *Queries) ConsumeInvitationByEmail(ctx context.Context, email string) er
 	return err
 }
 
-// OAuthFlow mirrors one oauth_flows row. State is the sha256 of the raw state
-// nonce the client was redirected with; the raw nonce itself never lands in DB.
+// OAuthFlow is one oauth_flows row; State is sha256 of the raw nonce, which never lands in the DB.
 type OAuthFlow struct {
 	ID               uuid.UUID
 	Provider         string
@@ -486,8 +424,6 @@ type OAuthFlow struct {
 	CreatedAt        time.Time
 }
 
-// InsertOAuthFlow records a new flow bound to the initiating session hash.
-// oauth_flows is an unscoped platform table (001 sweep).
 func (q *Queries) InsertOAuthFlow(ctx context.Context, f OAuthFlow) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into oauth_flows (id, provider, state, code_verifier, redirect, session_token_hash, expires_at)
@@ -496,10 +432,7 @@ func (q *Queries) InsertOAuthFlow(ctx context.Context, f OAuthFlow) error {
 	return err
 }
 
-// ConsumeOAuthFlow atomically claims the flow whose state hash matches and
-// whose bound session matches (NULL-safe IS NOT DISTINCT FROM). The DELETE
-// makes the state single-use in the same statement that returns it: a replay,
-// an expired flow, or a session mismatch yields zero rows and no IdP traffic.
+// ConsumeOAuthFlow deletes+returns in one statement (single-use state); replay/expired/session-mismatch => 0 rows.
 func (q *Queries) ConsumeOAuthFlow(ctx context.Context, state, sessionTokenHash []byte) (OAuthFlow, error) {
 	row := q.tx.QueryRow(ctx, `
 		delete from oauth_flows
@@ -520,8 +453,7 @@ func scanOAuthFlow(row pgx.Row) (OAuthFlow, error) {
 	return f, nil
 }
 
-// OAuthToken is one row of oauth_tokens. RefreshToken and AccessToken hold
-// AEAD-GCM ciphertext; the plaintext never reaches the DB (plan 003).
+// OAuthToken is one oauth_tokens row; token fields hold AEAD-GCM ciphertext, never plaintext.
 type OAuthToken struct {
 	UserID       uuid.UUID
 	Provider     string
@@ -531,10 +463,7 @@ type OAuthToken struct {
 	TokenExpiry  *time.Time
 }
 
-// UpsertOAuthToken stores or rotates the (user, provider) token pair. The
-// refresh_token is preserved when the provider returns none again (Google
-// issues a refresh token only on first consent), and token_scopes are merged
-// as a sorted union so a lazy drive.readonly grant survives a later bare login.
+// UpsertOAuthToken preserves the old refresh_token when the new one is empty and merges scopes as a sorted union.
 func (q *Queries) UpsertOAuthToken(ctx context.Context, t OAuthToken) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into oauth_tokens (user_id, provider, refresh_token, access_token, token_scopes, token_expiry)
@@ -552,7 +481,6 @@ func (q *Queries) UpsertOAuthToken(ctx context.Context, t OAuthToken) error {
 	return err
 }
 
-// GetOAuthTokenByUser reads the stored (user, provider) token row.
 func (q *Queries) GetOAuthTokenByUser(ctx context.Context, userID uuid.UUID, provider string) (OAuthToken, error) {
 	row := q.tx.QueryRow(ctx, `
 		select user_id, provider, refresh_token, access_token, token_scopes, token_expiry
@@ -566,14 +494,12 @@ func (q *Queries) GetOAuthTokenByUser(ctx context.Context, userID uuid.UUID, pro
 	return t, nil
 }
 
-// Identity is one row of identities; (provider, subject) is the unique PK.
 type Identity struct {
 	Provider string
 	Subject  string
 	UserID   uuid.UUID
 }
 
-// GetIdentity resolves the user an (provider, subject) pair is linked to.
 func (q *Queries) GetIdentity(ctx context.Context, provider, subject string) (Identity, error) {
 	row := q.tx.QueryRow(ctx,
 		"select provider, subject, user_id from identities where provider = $1 and subject = $2",
@@ -585,8 +511,6 @@ func (q *Queries) GetIdentity(ctx context.Context, provider, subject string) (Id
 	return i, nil
 }
 
-// InsertIdentity links a new (provider, subject) to userID; the PK rejects a
-// duplicate pair.
 func (q *Queries) InsertIdentity(ctx context.Context, provider, subject string, userID uuid.UUID) error {
 	_, err := q.tx.Exec(ctx,
 		"insert into identities (provider, subject, user_id) values ($1, $2, $3)",
@@ -594,15 +518,12 @@ func (q *Queries) InsertIdentity(ctx context.Context, provider, subject string, 
 	return err
 }
 
-// Invitation is what a consumed invitation grants: the tenant and the role.
 type Invitation struct {
 	TenantID uuid.UUID
 	Role     string
 }
 
-// ConsumePendingInvitation atomically claims ONE live invitation for the
-// email (optionally scoped to tenantID by the same-statement UPDATE). A
-// concurrent or repeated consume returns pgx.ErrNoRows — idempotent (ST-19).
+// ConsumePendingInvitation claims one live invitation atomically; a repeated consume returns pgx.ErrNoRows.
 func (q *Queries) ConsumePendingInvitation(ctx context.Context, email string, tenantID *uuid.UUID) (Invitation, error) {
 	row := q.tx.QueryRow(ctx, `
 		update invitations set consumed_at = now()
@@ -619,8 +540,7 @@ func (q *Queries) ConsumePendingInvitation(ctx context.Context, email string, te
 	return scanInvitation(row)
 }
 
-// ConsumePendingInvitationByToken consumes a role-baked link the same way:
-// the consumed_at guard makes a double-consume a zero-row no-op.
+// ConsumePendingInvitationByToken consumes a role-baked link; the consumed_at guard makes double-consume a no-op.
 func (q *Queries) ConsumePendingInvitationByToken(ctx context.Context, tokenHash []byte) (Invitation, error) {
 	row := q.tx.QueryRow(ctx, `
 		update invitations set consumed_at = now()
@@ -638,8 +558,6 @@ func scanInvitation(row pgx.Row) (Invitation, error) {
 	return inv, nil
 }
 
-// AddMembershipIfAbsent grants role in tenantID unless the member exists —
-// the membership half of invitation consumption (ST-19).
 func (q *Queries) AddMembershipIfAbsent(ctx context.Context, tenantID, userID uuid.UUID, role string) error {
 	_, err := q.tx.Exec(ctx, `
 		insert into memberships (tenant_id, user_id, role) values ($1, $2, $3)
@@ -648,7 +566,7 @@ func (q *Queries) AddMembershipIfAbsent(ctx context.Context, tenantID, userID uu
 	return err
 }
 
-// ImportStatus mirrors the DB CHECK-constrained text values for imports.status.
+// ImportStatus values mirror the DB import_status enum.
 type ImportStatus uint8
 
 const (
@@ -681,8 +599,7 @@ func parseImportStatus(s string) (ImportStatus, error) {
 	}
 }
 
-// Import is one row of the imports table. PostID is NULL before Apply; the
-// FK ON DELETE SET NULL means deleting the draft lets the user re-apply.
+// Import is one imports row; PostID is NULL before Apply and FK ON DELETE SET NULL frees the source for re-apply.
 type Import struct {
 	ID           uuid.UUID
 	TenantID     uuid.UUID
@@ -700,15 +617,12 @@ type Import struct {
 const importColumns = `id, tenant_id, user_id, post_id, source_format, source_key,
 	status, markdown_out, error, created_at, updated_at`
 
-// GetImportByID reads one import row under the ambient scope.
 func (q *Queries) GetImportByID(ctx context.Context, id uuid.UUID) (Import, error) {
 	row := q.tx.QueryRow(ctx, "select "+importColumns+" from imports where id = $1", id)
 	return scanImport(row)
 }
 
-// SetImportPostID links an import to its created draft atomically: only a
-// NULL post_id may be claimed (CAS), so concurrent Apply calls cannot both
-// link the same import. Zero rows affected => post_id was already set.
+// SetImportPostID claims the import's NULL post_id (CAS), so concurrent Apply calls cannot both link it.
 func (q *Queries) SetImportPostID(ctx context.Context, id uuid.UUID, postID uuid.UUID) error {
 	tag, err := q.tx.Exec(ctx, `
 		update imports set post_id = $2, updated_at = now()
@@ -722,8 +636,7 @@ func (q *Queries) SetImportPostID(ctx context.Context, id uuid.UUID, postID uuid
 	return nil
 }
 
-// ImportUpdate carries the mutable fields for an imports row. A nil pointer
-// means "leave unchanged"; a pointer to a zero value means "set to NULL/default".
+// ImportUpdate carries mutable fields; nil means "leave unchanged", a pointer to zero means "set".
 type ImportUpdate struct {
 	Status      *ImportStatus
 	PostID      *uuid.UUID
@@ -731,8 +644,6 @@ type ImportUpdate struct {
 	Error       *string
 }
 
-// UpdateImport overwrites the mutable fields of an import row. RLS confines
-// the update to rows visible to the ambient scope.
 func (q *Queries) UpdateImport(ctx context.Context, id uuid.UUID, u ImportUpdate) error {
 	tag, err := q.tx.Exec(ctx, `
 		update imports set
@@ -764,7 +675,6 @@ func importStatusPtr(s *ImportStatus) any {
 	return s.String()
 }
 
-// Tenant is one row of tenants.
 type Tenant struct {
 	ID             uuid.UUID
 	Slug           string
@@ -775,7 +685,6 @@ type Tenant struct {
 	UpdatedAt      time.Time
 }
 
-// GetTenant reads one tenant by ID (unscoped).
 func (q *Queries) GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
 	row := q.tx.QueryRow(ctx,
 		`select id, slug, name, settings, content_version, created_at, updated_at
@@ -783,7 +692,6 @@ func (q *Queries) GetTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
 	return scanTenant(row)
 }
 
-// ListTenants returns all tenants ordered by created_at (unscoped).
 func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
 	rows, err := q.tx.Query(ctx,
 		`select id, slug, name, settings, content_version, created_at, updated_at
@@ -812,7 +720,6 @@ func scanTenant(row pgx.Row) (Tenant, error) {
 	return t, nil
 }
 
-// TenantMember is one membership row for the admin members list.
 type TenantMember struct {
 	UserID      uuid.UUID
 	Email       string
@@ -820,7 +727,6 @@ type TenantMember struct {
 	Role        string
 }
 
-// ListTenantMembers returns every member of tenantID (unscoped).
 func (q *Queries) ListTenantMembers(ctx context.Context, tenantID uuid.UUID) ([]TenantMember, error) {
 	rows, err := q.tx.Query(ctx, `
 		select u.id, u.email, u.display_name, m.role
@@ -843,7 +749,6 @@ func (q *Queries) ListTenantMembers(ctx context.Context, tenantID uuid.UUID) ([]
 	return ms, rows.Err()
 }
 
-// SetMembershipRole updates a membership role (unscoped).
 func (q *Queries) SetMembershipRole(ctx context.Context, tenantID, userID uuid.UUID, role string) error {
 	tag, err := q.tx.Exec(ctx,
 		"update memberships set role = $3 where tenant_id = $1 and user_id = $2",
@@ -857,7 +762,6 @@ func (q *Queries) SetMembershipRole(ctx context.Context, tenantID, userID uuid.U
 	return nil
 }
 
-// RemoveMembership deletes a membership (unscoped).
 func (q *Queries) RemoveMembership(ctx context.Context, tenantID, userID uuid.UUID) error {
 	tag, err := q.tx.Exec(ctx,
 		"delete from memberships where tenant_id = $1 and user_id = $2",
@@ -871,8 +775,7 @@ func (q *Queries) RemoveMembership(ctx context.Context, tenantID, userID uuid.UU
 	return nil
 }
 
-// UpdateTenant updates a tenant's name and settings, bumping content_version
-// because any settings change is public-visible content (unscoped).
+// UpdateTenant bumps content_version because any settings change is public-visible content.
 func (q *Queries) UpdateTenant(ctx context.Context, id uuid.UUID, name string, settings json.RawMessage) (Tenant, error) {
 	row := q.tx.QueryRow(ctx, `
 		update tenants set
@@ -885,7 +788,6 @@ func (q *Queries) UpdateTenant(ctx context.Context, id uuid.UUID, name string, s
 	return scanTenant(row)
 }
 
-// DeleteTenant removes a tenant row (unscoped).
 func (q *Queries) DeleteTenant(ctx context.Context, id uuid.UUID) error {
 	_, err := q.tx.Exec(ctx, "delete from tenants where id = $1", id)
 	return err

@@ -1,13 +1,9 @@
-// Package httptest is the ST-1…ST-23 contract harness for the 010 HTTP layer.
-// It spins the REAL router (internal/api) against a throwaway Postgres so the
-// tests exercise the same middleware chain, handlers, and SQL the binary runs.
-// Follows the repo convention: skip when DATABASE_URL is unset.
+// Package httptest runs the real router against a throwaway Postgres; skips without DATABASE_URL.
 package httptest
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -115,7 +111,6 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// harness wires the real router against the shared scratch database.
 type harness struct {
 	t       *testing.T
 	db      *store.DB
@@ -127,8 +122,7 @@ type harness struct {
 	pub     *publicapi.API
 }
 
-// newHarness resets state and returns a ready harness. Each ST gets a clean DB
-// (truncate) so tests cannot leak tenants/users into one another.
+// newHarness truncates state so tests cannot leak rows into one another.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	if os.Getenv("DATABASE_URL") == "" {
@@ -155,7 +149,6 @@ func (h *harness) reset() {
 	}
 }
 
-// httpServer returns an httptest.Server running the real router.
 func (h *harness) httpServer() *httptest.Server {
 	srv := api.New(api.Deps{
 		DB:            h.db,
@@ -190,7 +183,6 @@ func (h *harness) createUser(email, password string) uuid.UUID {
 	return id
 }
 
-// issueToken mints a session for userID. tenantID may be nil (no tenant chosen).
 func (h *harness) issueToken(userID uuid.UUID, tenantID *uuid.UUID) string {
 	h.t.Helper()
 	token, err := h.session.Issue(context.Background(), userID, auth.TokenTTL, tenantID)
@@ -232,15 +224,8 @@ func (h *harness) setSuperAdmin(userID uuid.UUID, super bool) {
 	}
 }
 
-// authHeader builds the Authorization header for a session token.
 func authHeader(token string) string { return "Bearer " + token }
 
-func hashToken(token string) []byte {
-	h := sha256.Sum256([]byte(token))
-	return h[:]
-}
-
-// req builds a JSON request.
 func req(t *testing.T, method, url string, body any) *http.Request {
 	t.Helper()
 	var buf bytes.Buffer
@@ -257,7 +242,6 @@ func req(t *testing.T, method, url string, body any) *http.Request {
 	return r
 }
 
-// do performs r against srv, attaching the bearer token when non-empty.
 func do(t *testing.T, srv *httptest.Server, r *http.Request, token string) *http.Response {
 	t.Helper()
 	if token != "" {
@@ -270,7 +254,6 @@ func do(t *testing.T, srv *httptest.Server, r *http.Request, token string) *http
 	return resp
 }
 
-// decode reads and decodes a JSON response body, closing it.
 func decode(t *testing.T, resp *http.Response, v any) {
 	t.Helper()
 	defer resp.Body.Close()
@@ -279,7 +262,6 @@ func decode(t *testing.T, resp *http.Response, v any) {
 	}
 }
 
-// noopR2 is a no-op object store for harnesses that never touch real bytes.
 type noopR2 struct{}
 
 func (n *noopR2) Put(_ context.Context, _ string, _ []byte) error { return nil }

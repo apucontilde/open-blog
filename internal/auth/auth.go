@@ -1,4 +1,3 @@
-// Package auth implements password authentication and opaque session tokens.
 package auth
 
 import (
@@ -15,57 +14,49 @@ import (
 	"openblog/internal/store"
 )
 
-// Session and token constants — the single source of truth for 010's wiring.
-const (
-	// TokenLen is the size in bytes of the raw session token before base64url.
-	TokenLen = 32
-	// TokenTTL is the fixed absolute session lifetime; Verify never extends it.
-	TokenTTL = 30 * 24 * time.Hour
-)
+const TokenLen = 32
 
-// argon2id parameters. Fixed — performance and memory are load-bearing, not config.
+// TokenTTL is the fixed absolute session lifetime; Verify never extends it.
+const TokenTTL = 30 * 24 * time.Hour
+
+// Fixed argon2id parameters — not config.
 const (
 	argon2Time    uint32 = 3
-	argon2Memory  uint32 = 64 * 1024 // KiB → 64 MiB per hash
+	argon2Memory  uint32 = 64 * 1024 // KiB (64 MiB/hash)
 	argon2Threads uint8  = 2
 	argon2KeyLen  uint32 = 32
 	argon2SaltLen        = 16
 )
 
-// argon2Concurrency caps concurrent in-handler hashes to 4 (≤256 MiB peak).
+// argon2Concurrency caps concurrent in-handler hashes (peak 4×64 MiB).
 const argon2Concurrency = 4
 
 var (
-	// ErrInvalidCredentials covers an unknown email, a wrong password, and a
-	// passwordless account — indistinguishably, by design (constant time).
+	// Covers unknown email, wrong password, and passwordless accounts indistinguishably.
 	ErrInvalidCredentials = errors.New("auth: invalid credentials")
 
-	// ErrInvited rejects a password signup that would pre-empt an invite.
+	// ErrInvited rejects a signup for an email with a pending invitation.
 	ErrInvited = errors.New("auth: a pending invitation exists for this email")
 
-	// ErrInvalidUserID guards the session FK: Issue must never insert a row
-	// for a zero/unknown user.
+	// Guards the sessions FK: never issue for a zero user id.
 	ErrInvalidUserID = errors.New("auth: refusing to issue a session for a zero user id")
 
-	// ErrNoSession and ErrSessionExpired both map to 401 in 010.
+	// ErrNoSession and ErrSessionExpired both map to 401.
 	ErrNoSession      = errors.New("auth: no session for this token")
 	ErrSessionExpired = errors.New("auth: session expired")
 )
 
-// Auth is the password + session service. Safe for concurrent use.
+// Auth is safe for concurrent use.
 type Auth struct {
 	store *store.DB
 	lim   *limiter
 }
 
-// New builds an Auth over the store connection pool.
 func New(s *store.DB) *Auth {
 	return &Auth{store: s, lim: newLimiter(argon2Concurrency)}
 }
 
-// Issue mints a new session for the verified user and returns the raw token
-// string. It is the only session-insert path. ttl is the absolute lifetime;
-// callers pass TokenTTL. scope may be nil (no tenant selected yet).
+// Issue is the only session-insert path; ttl is the absolute lifetime.
 func (a *Auth) Issue(ctx context.Context, userID uuid.UUID, ttl time.Duration, scope *uuid.UUID) (string, error) {
 	if userID == uuid.Nil {
 		return "", ErrInvalidUserID
@@ -89,8 +80,6 @@ func (a *Auth) Issue(ctx context.Context, userID uuid.UUID, ttl time.Duration, s
 	return token, nil
 }
 
-// Verify looks up the session by token hash and checks expiry. Returns the
-// bound user and tenant scope. Two PK-level reads at most, microseconds.
 func (a *Auth) Verify(ctx context.Context, token string) (uuid.UUID, uuid.UUID, error) {
 	hash := tokenHash(token)
 	var userID, scope uuid.UUID
@@ -114,7 +103,6 @@ func (a *Auth) Verify(ctx context.Context, token string) (uuid.UUID, uuid.UUID, 
 	return userID, scope, err
 }
 
-// Logout deletes the session row for the presented token.
 func (a *Auth) Logout(ctx context.Context, token string) error {
 	hash := tokenHash(token)
 	return a.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
@@ -122,9 +110,8 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 	})
 }
 
-// Login authenticates email/password and mints a fresh session token.
-// Both branches run the same argon2 cost (unknown email verifies against a
-// fixed dummy hash that is never accepted) so timing reveals nothing.
+// Unknown email and SSO-only accounts verify the fixed dummy hash but always
+// fail, so both branches cost the same argon2 run and leak nothing.
 func (a *Auth) Login(ctx context.Context, email, password string) (string, error) {
 	email = normalizeEmail(email)
 	var userID uuid.UUID
@@ -145,8 +132,6 @@ func (a *Auth) Login(ctx context.Context, email, password string) (string, error
 	return a.Issue(ctx, userID, TokenTTL, nil)
 }
 
-// Signup creates a password-identity user. Normalizes email to lowercase.
-// Returns ErrInvited if a live invitation exists for that email.
 func (a *Auth) Signup(ctx context.Context, email, password string) (uuid.UUID, error) {
 	email = normalizeEmail(email)
 	if email == "" || password == "" {
@@ -180,8 +165,6 @@ func (a *Auth) Signup(ctx context.Context, email, password string) (uuid.UUID, e
 	return userID, nil
 }
 
-// HasPendingInvitation reports whether a live (unconsumed, non-expired)
-// invitation exists for the normalized email. Thin helper for signup/010.
 func (a *Auth) HasPendingInvitation(ctx context.Context, email string) (bool, error) {
 	email = normalizeEmail(email)
 	var invited bool
@@ -193,9 +176,7 @@ func (a *Auth) HasPendingInvitation(ctx context.Context, email string) (bool, er
 	return invited, err
 }
 
-// verifyBestEffort compares password against stored, or — for a NULL stored
-// hash (unknown email or SSO-only account) — against the fixed dummy hash but
-// always fails, so both branches cost the same argon2 run and leak nothing.
+// A nil stored hash runs the dummy hash but always fails, keeping both branches equal.
 func (a *Auth) verifyBestEffort(ctx context.Context, stored *string, password string) error {
 	if stored == nil {
 		_ = verifyPassword(ctx, a.lim, dummyHash(), password)
@@ -207,13 +188,11 @@ func (a *Auth) verifyBestEffort(ctx context.Context, stored *string, password st
 	return nil
 }
 
-// tokenHash is the sha256 of the token string exactly as the client presents
-// it — the only form ever stored or looked up.
+// tokenHash is the only form ever stored or looked up — never the raw token.
 func tokenHash(token string) [sha256.Size]byte {
 	return sha256.Sum256([]byte(token))
 }
 
-// newToken returns a fresh opaque token: TokenLen random bytes, base64url.
 func newToken() (string, error) {
 	raw := make([]byte, TokenLen)
 	if _, err := rand.Read(raw); err != nil {

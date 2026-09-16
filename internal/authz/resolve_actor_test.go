@@ -11,9 +11,8 @@ import (
 	"openblog/internal/store"
 )
 
-// TestResolveActor exercises the resolution service against a real database.
-// It skips unless DATABASE_URL is set. Seed rows are created unscoped
-// (memberships and users are not RLS-scoped).
+// TestResolveActor skips unless DATABASE_URL is set; seed rows are created
+// unscoped because memberships and users are not RLS-scoped.
 func TestResolveActor(t *testing.T) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {

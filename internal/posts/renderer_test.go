@@ -25,9 +25,8 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
-// TestRenderRejectsXSS asserts the sanitizer drops whole elements whose
-// payload can't be represented safely: javascript:/data: sources, raw script
-// or iframe, and attribute-injected handlers.
+// TestRenderRejectsXSS: the sanitizer drops javascript:/data: sources, raw
+// script/iframe, and attribute-injected handlers.
 func TestRenderRejectsXSS(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -120,8 +119,8 @@ func TestRenderRejectsXSS(t *testing.T) {
 	}
 }
 
-// TestRenderMetadataOptIn exercises the service-level policy knob: the default
-// host allow-list rejects off-origin images; the metadata opt-in opens them.
+// TestRenderMetadataOptIn: the default host allow-list rejects off-origin
+// images; {"allow_external_images":true} opens them.
 func TestRenderMetadataOptIn(t *testing.T) {
 	const md = "![x](https://cdn.other.example/img.png)"
 	svc := New(nil, Config{})
@@ -151,8 +150,7 @@ func TestRenderMetadataOptIn(t *testing.T) {
 	}
 }
 
-// TestRenderPathForms asserts valid image path shapes pass so the golden and
-// service builds agree on what "media" means.
+// TestRenderPathForms: valid media-origin image path shapes must pass.
 func TestRenderPathForms(t *testing.T) {
 	valid := []string{
 		"https://media.example.com/tenant/posts/abc.png",
@@ -171,8 +169,7 @@ func TestRenderPathForms(t *testing.T) {
 	}
 }
 
-// TestRenderFixtureSanity covers the shape-check helpers directly so a typo in
-// the allowed-url regexes can't silently regress the host allow-list.
+// TestRenderFixtureSanity covers the shape-check helpers directly.
 func TestRenderFixtureSanity(t *testing.T) {
 	if !imageHostAllowed("https://media.example.com/x.png", []string{"media.example.com"}) {
 		t.Error("exact host should match")

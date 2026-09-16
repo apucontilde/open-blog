@@ -6,7 +6,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// allCaps is the full capability ladder, in declaration order.
 var allCaps = []Capability{
 	CapCreateDraft, CapEditOwnDraft, CapUploadMedia, CapRunImport,
 	CapEditAnyPost, CapPublishArchive, CapViewMembers,
@@ -17,8 +16,7 @@ func mkActor(role Role) Actor {
 	return Actor{UserID: uuid.Nil, Tenant: &uuid.Nil, Role: role}
 }
 
-// firstCapFor returns the first index in allCaps whose RoleFor is above role;
-// the lower indices are exactly the capabilities role holds.
+// firstCapFor gives the count of capabilities role holds.
 func firstCapFor(role Role) int {
 	for i, cap := range allCaps {
 		if RoleFor(cap) > role {

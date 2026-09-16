@@ -13,8 +13,7 @@ import (
 	"openblog/internal/store"
 )
 
-// testAuth builds an Auth over DATABASE_URL (already migrated by cmd/migrate).
-// Skipped when DATABASE_URL is unset: the pure-logic tests still run.
+// testAuth builds an Auth over DATABASE_URL; skips the test if unset.
 func testAuth(t *testing.T) *Auth {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
@@ -34,7 +33,6 @@ func uniqueEmail(prefix string) string {
 	return fmt.Sprintf("%s-%s@example.com", prefix, uuid.NewString())
 }
 
-// createUser inserts a users row (required by the sessions FK) and returns it.
 func createUser(t *testing.T, a *Auth, email string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
@@ -163,7 +161,7 @@ func TestSignupBlockedByPendingInvitation(t *testing.T) {
 	ctx := context.Background()
 	email := uniqueEmail("invited")
 
-	// Seed a live pure-email invitation (real tenant row satisfies both FKs).
+	// Seed a live pure-email invitation; a real tenant row satisfies both FKs.
 	tenantID := uuid.New()
 	if err := a.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
 		if err := q.CreateTenant(ctx, tenantID, "inv-"+uuid.NewString(), "invite tenant"); err != nil {
@@ -181,7 +179,6 @@ func TestSignupBlockedByPendingInvitation(t *testing.T) {
 		t.Fatalf("Signup with pending invitation = %v, want ErrInvited", err)
 	}
 
-	// A consumed invitation no longer blocks signup.
 	if err := a.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
 		return q.ConsumeInvitationByEmail(ctx, email)
 	}); err != nil {

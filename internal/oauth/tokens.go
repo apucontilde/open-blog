@@ -12,20 +12,12 @@ import (
 	"openblog/internal/store"
 )
 
-// GoogleExporter is 007's handle into 003's stored Google token: a refresh
-// engine that returns a usable access token or a 401-class error.
+// GoogleExporter returns a live Google access token for the import job.
 type GoogleExporter func(ctx context.Context, userID uuid.UUID, wantDriveReadonly bool) (string, error)
 
-// GoogleExporter returns the handle 007 stores and calls at import time.
 func (o *OAuth) GoogleExporter() GoogleExporter { return o.GetGoogleToken }
 
-// GetGoogleToken returns a live Google access token for userID. The stored
-// token_scopes gate the attempt: wantDriveReadonly requires the lazily granted
-// drive.readonly scope, never assumed. A still-valid access token is returned
-// as-is; an expired one is silently refreshed from the AEAD-stored refresh
-// token and the rotated pair re-encrypted and stored. Errors: ErrNoToken when
-// no token exists, ErrScopeMissing when the required scope was never granted,
-// ErrRefreshFailed when the token is expired and cannot be refreshed.
+// GetGoogleToken returns a live token, refreshing and re-storing the rotated pair when expired; wantDriveReadonly requires the recorded grant.
 func (o *OAuth) GetGoogleToken(ctx context.Context, userID uuid.UUID, wantDriveReadonly bool) (string, error) {
 	p, ok := o.providers[ProviderGoogle]
 	if !ok {
@@ -61,8 +53,7 @@ func (o *OAuth) GetGoogleToken(ctx context.Context, userID uuid.UUID, wantDriveR
 	if err != nil {
 		return "", errDecrypt
 	}
-	// Force a refresh: a zero or future expiry would make reuseTokenSource
-	// return the stored access token unchanged.
+	// Force a refresh: a future expiry would leave the stored token unchanged.
 	old := &oauth2.Token{
 		AccessToken:  string(access),
 		TokenType:    "Bearer",
@@ -76,8 +67,7 @@ func (o *OAuth) GetGoogleToken(ctx context.Context, userID uuid.UUID, wantDriveR
 	if nt.AccessToken == "" {
 		return "", ErrRefreshFailed
 	}
-	// Upsert's coalesce keeps the stored refresh token untouched when Google
-	// does not rotate one, preserving offline access for the next import.
+	// Keep the stored refresh token when the IdP does not rotate one.
 	if err := o.storeOAuthToken(ctx, userID, ProviderGoogle, nt); err != nil {
 		return "", err
 	}

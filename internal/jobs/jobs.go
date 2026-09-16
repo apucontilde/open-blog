@@ -9,14 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// ErrDuplicate reports that a job with the same (kind, dedupe_key) already
-// exists; re-enqueueing an idempotent operation is a caller-level no-op.
+// ErrDuplicate reports an existing (kind, dedupe_key); the insert is a no-op.
 var ErrDuplicate = errors.New("jobs: duplicate dedupe_key")
 
-// Enqueue inserts a job row inside the caller's transaction: a commit always
-// carries its job, a rollback takes it with the rest of the domain write.
-// dedupeKey empty disables dedupe (stored as NULL, outside the partial unique
-// index); a non-empty duplicate key yields ErrDuplicate and inserts nothing.
+// Enqueue inserts inside the caller's tx (a commit carries the job); empty dedupeKey disables dedupe, a duplicate yields ErrDuplicate.
 func Enqueue(ctx context.Context, tx pgx.Tx, kind, dedupeKey string, payload any) (uuid.UUID, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -35,8 +31,7 @@ func Enqueue(ctx context.Context, tx pgx.Tx, kind, dedupeKey string, payload any
 	return id, err
 }
 
-// EnqueueBatch inserts many jobs in one CopyFrom round trip. dedupe disabled
-// for batch rows (bulk writes are already idempotent at the item level).
+// EnqueueBatch inserts many jobs in one CopyFrom; dedupe is disabled for the batch.
 func EnqueueBatch(ctx context.Context, tx pgx.Tx, kind string, payloads []any) (int64, error) {
 	rows := make([][]any, len(payloads))
 	for i, p := range payloads {

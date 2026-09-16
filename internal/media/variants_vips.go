@@ -1,9 +1,7 @@
 //go:build vips
 
-// The govips/libvips processor. Build with -tags vips when libvips dev libs
-// are installed (pkg-config --exists vips). Worker-only by construction (job
-// queue never runs a request goroutine); concurrency is capped by a semaphore
-// so libvips memory stays bounded across concurrent variant jobs.
+// The govips/libvips processor; worker-only, with concurrency capped so libvips
+// memory stays bounded.
 package media
 
 import (
@@ -20,18 +18,17 @@ func init() {
 	}
 }
 
-// vipsConcurrency caps concurrent libvips encode/decode (plan 006: 2–4).
+// vipsConcurrency caps concurrent libvips decode/encode.
 const vipsConcurrency = 2
 
 var vipsSem = make(chan struct{}, vipsConcurrency)
 
-// vipsProcessor is the cgo VariantProcessor. Decode happens through libvips:
-// animated GIFs load their first page only (ImportParams{Page:0,NumPages:1})
-// and AVIF decodes via the libvips heif loader.
+// vipsProcessor decodes through libvips: animated GIFs load their first page
+// only, AVIF via the heif loader.
 type vipsProcessor struct{}
 
-// NewVipsProcessor returns the libvips-backed processor. Callers running a
-// variant job queue should share one instance.
+// NewVipsProcessor returns the libvips-backed processor; callers running a
+// variant queue should share one instance.
 func NewVipsProcessor() VariantProcessor { return vipsProcessor{} }
 
 func (vipsProcessor) Process(ctx context.Context, _ string, original []byte, originalKey string) (Processed, error) {

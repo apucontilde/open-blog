@@ -20,9 +20,7 @@ import (
 	"openblog/migrations"
 )
 
-// RLS only bites a non-superuser: superusers bypass row-level security, so the
-// harness provisions a plain application role ("blog_app", the plan's single
-// connection role) as the scratch database owner and runs everything as it.
+// RLS only bites a non-superuser, so the harness runs as the plain app role it provisions as owner.
 const (
 	appRole     = "blog_app"
 	appPassword = "blog_secret"
@@ -35,9 +33,6 @@ type testDB struct {
 	pool *pgxpool.Pool
 }
 
-// newScratchDB provisions a throwaway database owned by blog_app, replays the
-// embedded goose migrations into it, and skips cleanly when no reachable,
-// privileged DATABASE_URL is available.
 func newScratchDB(t *testing.T) *testDB {
 	t.Helper()
 	ctx := context.Background()
@@ -215,9 +210,7 @@ func stripSQLComments(s string) string {
 	return b.String()
 }
 
-// TestTenantIsolation — tenants A+B, one draft post each; Scope{A} lists only
-// its own row, cannot attach an image/import to B's post (composite
-// (tenant_id, post_id) FK rejects), and cannot reach B's rows.
+// TestTenantIsolation: Scope{A} lists only its rows and cannot attach a child to B's post (composite FK).
 func TestTenantIsolation(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -232,8 +225,7 @@ func TestTenantIsolation(t *testing.T) {
 		t.Fatalf("Scope{A} listed %v, want only post A", ids)
 	}
 
-	// A cannot attach a post_images/imports row to B's post: the composite FK
-	// (tenant_id, post_id) has no (A, PB) anchor in posts.
+	// composite FK has no (A, PB) anchor in posts
 	err := f.td.s.ScopedRW(ctx, store.Scope{TenantID: f.a}, func(q *store.Queries) error {
 		return q.CreatePostImage(ctx, uuid.New(), f.a, f.pb, "r2-key", "https://img", 1, 1, 1, "image/png")
 	})
@@ -247,9 +239,6 @@ func TestTenantIsolation(t *testing.T) {
 		t.Fatal("attaching an import to another tenant's post succeeded; expected FK rejection")
 	}
 
-	// memberships carry no write API in plan 001 (role changes are RBAC, plan
-	// 004); read-side membership privacy is pinned in TestMembershipScoping.
-	// B's rows remain unreachable from A.
 	posts = []store.Post{}
 	assertErr(t, f.td.s.Scoped(ctx, store.Scope{TenantID: f.a}, func(q *store.Queries) error {
 		var err error
@@ -261,10 +250,7 @@ func TestTenantIsolation(t *testing.T) {
 	}
 }
 
-// TestFailClosed — a bare zero scope reads 0 rows and writes are rejected by
-// the RLS `with check` (not by privileges), including the sweep reassertion
-// that a nil-cast must still yield SQL NULL against a tenant whose id really
-// is the nil uuid.
+// TestFailClosed: a zero scope reads 0 rows, writes hit RLS with-check, and a nil-uuid tenant stays unreachable.
 func TestFailClosed(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -279,9 +265,7 @@ func TestFailClosed(t *testing.T) {
 		t.Fatalf("unscoped read saw %v posts; wants 0", postIDs(posts))
 	}
 
-	// write under no tenant: with check (app_scope() or tenant_id = NULL) is
-	// NULL -> row rejected. Drafts of other tenants are not visible either
-	// (ListPosts above already proves it: zero rows).
+	// with check (app_scope() or tenant_id = NULL) is NULL -> row rejected
 	err := f.td.s.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
 		_, err := q.CreatePost(ctx, store.Post{ID: uuid.New(), TenantID: f.a, AuthorID: f.u, Slug: "x", Title: "X"})
 		return err
@@ -290,8 +274,7 @@ func TestFailClosed(t *testing.T) {
 		t.Fatal("write under a zero scope succeeded; RLS with check must reject")
 	}
 
-	// Sweep reassertion (finding 8): a tenant row whose id is the nil uuid must
-	// NOT become reachable. The nil cast -> SQL NULL -> policy NULL -> no rows.
+	// a tenant whose id is the nil uuid must stay unreachable: nil cast -> SQL NULL -> no rows
 	nilTen := uuid.Nil
 	nilPost := uuid.New()
 	assertErr(t, f.td.s.ScopedRW(ctx, store.Scope{Platform: true}, func(q *store.Queries) error {
@@ -320,8 +303,7 @@ func TestFailClosed(t *testing.T) {
 	}
 }
 
-// TestPlatformSeesAll — an app_scope() set sees every tenant's rows and still
-// cannot break Postgres FK rules.
+// TestPlatformSeesAll: an app_scope() set sees every tenant's rows but still cannot break Postgres FK rules.
 func TestPlatformSeesAll(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -336,7 +318,7 @@ func TestPlatformSeesAll(t *testing.T) {
 		t.Fatalf("platform scope saw %v, want both A and B posts", ids)
 	}
 
-	// platform widens the RLS filter only; the FK to tenants(id) still holds.
+	// platform widens RLS only; the FK to tenants(id) still holds
 	err := f.td.s.ScopedRW(ctx, store.Scope{Platform: true}, func(q *store.Queries) error {
 		_, err := q.CreatePost(ctx, store.Post{ID: uuid.New(), TenantID: uuid.New(), AuthorID: f.u, Slug: "rogue", Title: "Rogue"})
 		return err
@@ -344,8 +326,7 @@ func TestPlatformSeesAll(t *testing.T) {
 	if err == nil {
 		t.Fatal("platform scope inserted a post for a nonexistent tenant; FK must reject")
 	}
-	// and the composite posts(tenant_id, id) anchor still rejects cross-tenant
-	// attachment even though app_scope() would otherwise widen with-check.
+	// platform still cannot attach across tenants via the composite anchor
 	err = f.td.s.ScopedRW(ctx, store.Scope{Platform: true}, func(q *store.Queries) error {
 		return q.CreatePostImage(ctx, uuid.New(), f.a, f.pb, "r2-key", "https://img", 1, 1, 1, "image/png")
 	})
@@ -354,9 +335,7 @@ func TestPlatformSeesAll(t *testing.T) {
 	}
 }
 
-// TestNoScopeLeakBetweenConnections — a scoped transaction leaves nothing on
-// the pooled connection for the next operation, and a non-mutating scope
-// rejects writes with the transaction's own BEGIN READ ONLY guard.
+// TestNoScopeLeakBetweenConnections: a scoped tx leaves no setting on the pooled connection; READ ONLY rejects writes.
 func TestNoScopeLeakBetweenConnections(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -376,8 +355,7 @@ func TestNoScopeLeakBetweenConnections(t *testing.T) {
 		t.Fatalf("tenant scope leaked into the next unscoped op: %v", postIDs(post))
 	}
 
-	// SET LOCAL only lives inside the user's transaction: a bare pooled
-	// connection carries no tenant either.
+	// SET LOCAL is transaction-scoped: a bare pooled connection carries no tenant
 	leaked := "set"
 	if err := f.td.pool.QueryRow(ctx, "select coalesce(current_setting('app.tenant_id', true), '')").Scan(&leaked); err != nil {
 		t.Fatalf("probe leaked setting: %v", err)
@@ -386,7 +364,7 @@ func TestNoScopeLeakBetweenConnections(t *testing.T) {
 		t.Fatalf("app.tenant_id leaked onto a pooled connection: %q", leaked)
 	}
 
-	// non-mutating scope: BEGIN READ ONLY is the write guard.
+	// BEGIN READ ONLY is the write guard
 	err := f.td.s.Scoped(ctx, store.Scope{TenantID: f.a}, func(q *store.Queries) error {
 		return q.CreatePostImage(ctx, uuid.New(), f.a, f.pa, "r2-key", "https://img", 1, 1, 1, "image/png")
 	})
@@ -398,8 +376,7 @@ func TestNoScopeLeakBetweenConnections(t *testing.T) {
 	}
 }
 
-// TestMembershipScoping — memberships is deliberately unscoped; privacy comes
-// from every membership query binding the actor's own user_id server-side.
+// TestMembershipScoping: memberships is unscoped; each query binds the actor's own user_id server-side.
 func TestMembershipScoping(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -417,8 +394,7 @@ func TestMembershipScoping(t *testing.T) {
 		t.Fatal("actor U must never see V's tenant C membership")
 	}
 
-	// a foreign user_id probe returns that user's own rows only, never the
-	// actor's; an actor with no memberships probes to 0 rows.
+	// a foreign probe returns that user's rows only; no memberships probes to 0
 	msV, err := f.td.s.Memberships(ctx, f.v)
 	assertErr(t, err)
 	if len(msV) != 1 || msV[0].TenantID != f.c {
@@ -430,7 +406,6 @@ func TestMembershipScoping(t *testing.T) {
 		t.Fatalf("actor W has no memberships but returned %v", msW)
 	}
 
-	// role resolvable per tenant; missing membership => ErrNotMember
 	role, err := f.td.s.MembershipRole(ctx, f.u, f.a)
 	assertErr(t, err)
 	if role != "owner" {
@@ -440,7 +415,6 @@ func TestMembershipScoping(t *testing.T) {
 		t.Fatalf("Role(U, c) err = %v, want ErrNotMember", err)
 	}
 
-	// the switcher (ST-20) lists the full actor set regardless of ambient scope
 	assertErr(t, f.td.s.Scoped(ctx, store.Scope{TenantID: f.a}, func(q *store.Queries) error {
 		within, err := f.td.s.Memberships(ctx, f.u)
 		if err != nil {
@@ -453,10 +427,7 @@ func TestMembershipScoping(t *testing.T) {
 	}))
 }
 
-// TestRlsLint — introspects the live scratch DB: every table in the
-// tenant-scoped set has FORCE + exactly one tenant_scope policy, no other
-// table has RLS, and the embedded goose migrations contain no tenant-scoped
-// DML (FORCE would silently no-op backfills into 0 rows).
+// TestRlsLint: the fixed set {posts, post_images, imports} has FORCE + one tenant_scope policy, no other RLS, migrations DDL-only.
 func TestRlsLint(t *testing.T) {
 	ctx := context.Background()
 	td := newScratchDB(t)
@@ -482,7 +453,6 @@ func TestRlsLint(t *testing.T) {
 		}
 	}
 
-	// no table outside the scoped set may be RLS-protected or carry a policy
 	rows, err := td.pool.Query(ctx, `
 		select c.relname from pg_class c
 		join pg_namespace n on n.oid = c.relnamespace
@@ -528,10 +498,7 @@ func TestRlsLint(t *testing.T) {
 //go:embed *.go
 var storeSources embed.FS
 
-// TestPlatformScopeDiscipline — Platform in a scope is only ever derived from
-// an actor whose flag/role was verified upstream (plan 010's scopeFromActor).
-// Until that lands, pin the structural invariant: no store code mints Platform;
-// the DB layer consumes it from callers and never turns it on itself.
+// TestPlatformScopeDiscipline: no store code mints Platform; callers verify the actor and pass it in.
 func TestPlatformScopeDiscipline(t *testing.T) {
 	entries, err := storeSources.ReadDir(".")
 	assertErr(t, err)

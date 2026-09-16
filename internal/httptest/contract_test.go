@@ -69,7 +69,6 @@ func mustStatus(t *testing.T, resp *http.Response, want int) {
 	}
 }
 
-// createPost creates a draft over HTTP and returns it.
 func createPost(t *testing.T, srv *httptest.Server, token, title, md string) postJSON {
 	t.Helper()
 	resp := do(t, srv, req(t, http.MethodPost, srv.URL+"/admin/posts", map[string]any{
@@ -81,8 +80,7 @@ func createPost(t *testing.T, srv *httptest.Server, token, title, md string) pos
 	return p
 }
 
-// ST-1: publish renders content once and the public read serves that artifact.
-// ST-5: a client-supplied tenant_id is ignored.
+// ST-1/ST-5: publish renders once; public read serves it; client tenant_id ignored.
 func TestST1_RenderOnPublishAndPublicRead(t *testing.T) {
 	h := newHarness(t)
 	srv := h.httpServer()
@@ -114,7 +112,6 @@ func TestST1_RenderOnPublishAndPublicRead(t *testing.T) {
 	mustStatus(t, r, http.StatusNotFound)
 	r.Body.Close()
 
-	// Publish re-renders; the public read serves content_html verbatim.
 	pr := do(t, srv, req(t, http.MethodPost, srv.URL+"/admin/posts/"+p.ID.String()+"/publish", nil), token)
 	mustStatus(t, pr, http.StatusOK)
 	pr.Body.Close()
@@ -158,7 +155,6 @@ func TestST3_TenantIsolation(t *testing.T) {
 	mustStatus(t, rb, http.StatusOK)
 	rb.Body.Close()
 
-	// Public beta listing shows only beta.
 	lr := do(t, srv, req(t, http.MethodGet, srv.URL+"/public/beta/posts", nil), "")
 	mustStatus(t, lr, http.StatusOK)
 	var list listJSON
@@ -167,7 +163,6 @@ func TestST3_TenantIsolation(t *testing.T) {
 		t.Fatalf("beta listing = %+v, want only beta-post", list.Posts)
 	}
 
-	// Beta cannot read alpha's post even by exact slug.
 	gr := do(t, srv, req(t, http.MethodGet, srv.URL+"/public/beta/posts/"+pA.Slug, nil), "")
 	mustStatus(t, gr, http.StatusNotFound)
 	gr.Body.Close()
@@ -192,7 +187,6 @@ func TestST6_AuthorOwnership(t *testing.T) {
 
 	p := createPost(t, srv, tokA, "A draft", "body")
 
-	// Another author cannot read/patch/publish/delete A's draft.
 	for _, tc := range []struct {
 		name, method, path string
 		body               any
@@ -211,12 +205,10 @@ func TestST6_AuthorOwnership(t *testing.T) {
 		r.Body.Close()
 	}
 
-	// An author cannot publish even their own draft (editor+ capability).
 	r := do(t, srv, req(t, http.MethodPost, srv.URL+"/admin/posts/"+p.ID.String()+"/publish", nil), tokA)
 	mustStatus(t, r, http.StatusForbidden)
 	r.Body.Close()
 
-	// An editor can patch and publish A's post.
 	er := do(t, srv, req(t, http.MethodPatch, srv.URL+"/admin/posts/"+p.ID.String(), map[string]any{"title": "Edited"}), tokE)
 	mustStatus(t, er, http.StatusOK)
 	er.Body.Close()
@@ -224,8 +216,7 @@ func TestST6_AuthorOwnership(t *testing.T) {
 	mustStatus(t, pr, http.StatusOK)
 	pr.Body.Close()
 
-	// ST-13: an author cannot delete a published post; an editor can, and an
-	// author can delete their own draft.
+	// ST-13: an author cannot delete a published post; an editor can.
 	dr := do(t, srv, req(t, http.MethodDelete, srv.URL+"/admin/posts/"+p.ID.String(), nil), tokA)
 	mustStatus(t, dr, http.StatusForbidden)
 	dr.Body.Close()
@@ -261,8 +252,7 @@ func TestST10_Unpublish(t *testing.T) {
 	g.Body.Close()
 }
 
-// ST-15: an owner's settings change bumps content_version and enqueues a purge;
-// non-owners are refused.
+// ST-15: owner settings change bumps content_version and enqueues a purge.
 func TestST15_TenantSettings(t *testing.T) {
 	h := newHarness(t)
 	srv := h.httpServer()
@@ -394,8 +384,7 @@ func TestST20_ActiveTenantSwitch(t *testing.T) {
 	denied.Body.Close()
 }
 
-// ST-23 (idempotency half): applying an import that already produced a draft is
-// a conflict, without needing a real converter.
+// ST-23: applying an import that already produced a draft is a conflict.
 func TestST23_ImportApplyIdempotency(t *testing.T) {
 	h := newHarness(t)
 	srv := h.httpServer()
@@ -431,8 +420,7 @@ func TestST23_ImportApplyIdempotency(t *testing.T) {
 	}
 }
 
-// Auth round-trip: signup, duplicate, login, me, logout. Also proves the strict
-// JSON decoder rejects unknown fields.
+// Auth round-trip plus strict-decode rejection of unknown fields.
 func TestAuth_SignupLoginLogout(t *testing.T) {
 	h := newHarness(t)
 	srv := h.httpServer()

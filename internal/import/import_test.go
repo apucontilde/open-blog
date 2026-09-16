@@ -19,8 +19,6 @@ import (
 	"openblog/internal/store"
 )
 
-// --- exec seam helpers ---
-
 func withFakeExec(t *testing.T, cmds map[string]string) {
 	t.Helper()
 	origNewCmd := newCmd
@@ -40,10 +38,8 @@ func withFakeExec(t *testing.T, cmds map[string]string) {
 	}
 }
 
-// fakeCommand returns a test double that writes stdout when run.
 func fakeCommand(t *testing.T, stdout string) string {
 	t.Helper()
-	// Create a temp script that echoes the given output.
 	dir := t.TempDir()
 	script := dir + "/fake-cmd"
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '"+strings.ReplaceAll(stdout, "'", "'\\''")+"'"), 0o755); err != nil {
@@ -51,8 +47,6 @@ func fakeCommand(t *testing.T, stdout string) string {
 	}
 	return script
 }
-
-// --- conversion dispatch tests ---
 
 func TestDispatch_DOCX_UsesPandoc(t *testing.T) {
 	withFakeExec(t, map[string]string{"pandoc": "/usr/bin/pandoc"})
@@ -67,22 +61,47 @@ func TestDispatch_PDF_UsesPdftotext(t *testing.T) {
 	if !ok || c == nil {
 		t.Fatal("expected pdftotext converter for pdf")
 	}
-	// Dispatch to pdftotext cannot be compared with !=; verify the expected
-	// converter's function pointer.
+	// dispatch to pdftotext cannot be compared with !=; compare function pointers.
 	if convPtr := reflect.ValueOf(c); convPtr.Pointer() != reflect.ValueOf(pdftotext).Pointer() {
 		t.Fatal("pdf dispatch should return pdftotext")
 	}
 }
 
 func TestDispatch_ODT_RTF_HTML_MD_AllUsePandoc(t *testing.T) {
-	for _, fmt := range []string{"odt", "rtf", "html", "md"} {
-		c, ok := dispatch(fmt)
+	withFakeExec(t, map[string]string{}) // pandoc unavailable: only a pandoc converter reports this
+	for _, format := range []string{"odt", "rtf", "html", "md"} {
+		c, ok := dispatch(format)
 		if !ok || c == nil {
-			t.Fatalf("expected converter for %s", fmt)
+			t.Fatalf("expected converter for %s", format)
 		}
-		if convPtr := reflect.ValueOf(c); convPtr.Pointer() != reflect.ValueOf(pandoc).Pointer() {
-			t.Fatalf("%s should dispatch to pandoc", fmt)
+		if _, _, err := c(context.Background(), []byte("x")); err == nil || !strings.Contains(err.Error(), "pandoc not found") {
+			t.Fatalf("%s should dispatch to pandoc, got err %v", format, err)
 		}
+	}
+}
+
+func TestPandoc_PassesSourceFormat(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := dir + "/args"
+	script := dir + "/pandoc"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\nprintf 'ok'"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withFakeExec(t, map[string]string{"pandoc": script})
+
+	c, ok := dispatch("docx")
+	if !ok {
+		t.Fatal("expected pandoc converter for docx")
+	}
+	if _, _, err := c(context.Background(), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "-f\ndocx") {
+		t.Fatalf("pandoc args = %q, want -f docx", args)
 	}
 }
 
@@ -93,11 +112,9 @@ func TestDispatch_Unknown_ReturnsFalse(t *testing.T) {
 	}
 }
 
-// --- LookPath failure ---
-
 func TestPandoc_LookPathFails(t *testing.T) {
 	withFakeExec(t, map[string]string{}) // empty = nothing on PATH
-	_, _, err := pandoc(context.Background(), []byte("# Hello"))
+	_, _, err := runPandoc(context.Background(), "markdown", []byte("# Hello"))
 	if err == nil {
 		t.Fatal("expected error when pandoc not found")
 	}
@@ -117,14 +134,11 @@ func TestPdftotext_LookPathFails(t *testing.T) {
 	}
 }
 
-// --- pandoc output cap ---
-
 func TestPandoc_OutputTooLarge(t *testing.T) {
-	// Create a script that outputs 3 MiB.
 	big := strings.Repeat("A", 3<<20)
 	script := fakeCommand(t, big)
 	withFakeExec(t, map[string]string{"pandoc": script})
-	_, _, err := pandoc(context.Background(), []byte("input"))
+	_, _, err := runPandoc(context.Background(), "markdown", []byte("input"))
 	if err == nil {
 		t.Fatal("expected output-size error")
 	}
@@ -132,8 +146,6 @@ func TestPandoc_OutputTooLarge(t *testing.T) {
 		t.Fatalf("expected size error, got: %v", err)
 	}
 }
-
-// --- format detection ---
 
 func TestParseSource_Multipart(t *testing.T) {
 	ext, format, err := parseSource(Source{
@@ -174,8 +186,6 @@ func TestParseSource_EmptyDocID(t *testing.T) {
 	}
 }
 
-// --- idempotency gate truth table (pure Go) ---
-
 func TestApplyGate_TruthTable(t *testing.T) {
 	md := "# Title\n\nBody"
 	postID := uuid.New()
@@ -204,8 +214,6 @@ func TestApplyGate_TruthTable(t *testing.T) {
 
 func ptrString(s string) *string { return &s }
 
-// --- fidelity ---
-
 func TestFidelityForFormat(t *testing.T) {
 	if f := fidelityForFormat("pdf"); f != "medium" {
 		t.Fatalf("pdf fidelity should be medium, got %s", f)
@@ -217,8 +225,6 @@ func TestFidelityForFormat(t *testing.T) {
 		t.Fatalf("gdoc fidelity should be high, got %s", f)
 	}
 }
-
-// --- importPayload round-trip ---
 
 func TestImportPayload_RoundTrip(t *testing.T) {
 	p := importPayload{
@@ -239,8 +245,6 @@ func TestImportPayload_RoundTrip(t *testing.T) {
 	}
 }
 
-// --- DB-backed tests (skip when DATABASE_URL is unset) ---
-
 func testDBURL(t *testing.T) string {
 	t.Helper()
 	return os.Getenv("DATABASE_URL")
@@ -257,7 +261,6 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	// Clean up test data.
 	for _, tbl := range []string{"imports", "posts", "memberships", "tenants", "users"} {
 		pool.Exec(ctx, "DELETE FROM "+tbl+" WHERE true")
 	}
@@ -302,7 +305,7 @@ func newTestService(pool *pgxpool.Pool) *Service {
 	}
 }
 
-// fakeR2 is an in-memory R2Put for tests.
+// fakeR2 is an in-memory R2Put.
 type fakeR2 struct {
 	orig map[string][]byte
 }
@@ -337,7 +340,6 @@ func TestDB_Apply_CreateDraftAndLink(t *testing.T) {
 	if err != nil {
 		t.Fatal("create import:", err)
 	}
-	// Set it to done with markdown.
 	err = testDB(pool).ScopedRW(ctx, store.Scope{TenantID: tenantID}, func(q *store.Queries) error {
 		return q.UpdateImport(ctx, importID, store.ImportUpdate{
 			Status:      ptrImportStatus(store.ImportDone),
@@ -402,11 +404,9 @@ func TestDB_Apply_ReApplyReturns409(t *testing.T) {
 	svc := newTestService(pool)
 	actor := testActor(tenantID, userID)
 
-	// First apply succeeds.
 	if _, err := svc.Apply(ctx, actor, importID); err != nil {
 		t.Fatal("first apply:", err)
 	}
-	// Second apply → 409.
 	_, err = svc.Apply(ctx, actor, importID)
 	if !errors.Is(err, ErrAlreadyApplied) {
 		t.Fatalf("expected ErrAlreadyApplied, got: %v", err)
@@ -438,13 +438,12 @@ func TestDB_Apply_DeleteDraftReApplySucceeds(t *testing.T) {
 	svc := newTestService(pool)
 	actor := testActor(tenantID, userID)
 
-	// First apply creates a draft.
 	post, err := svc.Apply(ctx, actor, importID)
 	if err != nil {
 		t.Fatal("first apply:", err)
 	}
 
-	// Delete the draft (FK ON DELETE SET NULL → imports.post_id = NULL).
+	// FK ON DELETE SET NULL nulls imports.post_id.
 	err = testDB(pool).ScopedRW(ctx, store.Scope{TenantID: tenantID}, func(q *store.Queries) error {
 		return q.DeletePost(ctx, post.ID)
 	})
@@ -452,7 +451,6 @@ func TestDB_Apply_DeleteDraftReApplySucceeds(t *testing.T) {
 		t.Fatal("delete post:", err)
 	}
 
-	// Re-apply should succeed (creates a fresh draft).
 	post2, err := svc.Apply(ctx, actor, importID)
 	if err != nil {
 		t.Fatal("re-apply:", err)
@@ -585,8 +583,7 @@ func TestDB_Apply_MaliciousDocumentSanitized(t *testing.T) {
 		t.Fatal("apply:", err)
 	}
 
-	// 005's renderer (ran inside posts.Create) must not have let hostile
-	// HTML survive: no script, no data:, no iframe in the stored content_html.
+	// 005's renderer (inside posts.Create) must not let hostile HTML survive.
 	html := post.ContentHTML
 	if strings.Contains(html, "<script") {
 		t.Fatalf("script survived 005 sanitizer: %s", html)
@@ -607,7 +604,6 @@ func TestDB_EnqueueInSameTx_RollbackLosesBoth(t *testing.T) {
 	tenantID, userID := seedTenantUser(t, pool)
 	ctx := context.Background()
 
-	// Begin a raw tx, create import + enqueue job, then roll back.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -694,8 +690,6 @@ func TestDB_Get_ReturnsCorrectData(t *testing.T) {
 	}
 }
 
-// --- worker handler tests ---
-
 func TestWorker_ConversionError_RecordsError(t *testing.T) {
 	pool := testPool(t)
 	tenantID, userID := seedTenantUser(t, pool)
@@ -711,8 +705,7 @@ func TestWorker_ConversionError_RecordsError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No pandoc on PATH → conversion error.
-	withFakeExec(t, map[string]string{})
+	withFakeExec(t, map[string]string{}) // no pandoc on PATH → conversion error
 	svc := newTestService(pool)
 	svc.r2.(*fakeR2).orig["nonexistent-key"] = []byte("fake docx bytes")
 
@@ -728,7 +721,6 @@ func TestWorker_ConversionError_RecordsError(t *testing.T) {
 		t.Fatal("handler should not propagate error (records it in DB):", err)
 	}
 
-	// Verify error is recorded.
 	err = testDB(pool).ScopedRW(ctx, store.Scope{TenantID: tenantID}, func(q *store.Queries) error {
 		imp, err := q.GetImportByID(ctx, importID)
 		if err != nil {
@@ -829,7 +821,6 @@ func TestWorker_UnsupportedFormat(t *testing.T) {
 		t.Fatal("handler should not propagate error:", err)
 	}
 
-	// Verify error status recorded.
 	err = testDB(pool).ScopedRW(ctx, store.Scope{TenantID: tenantID}, func(q *store.Queries) error {
 		imp, err := q.GetImportByID(ctx, importID)
 		if err != nil {
@@ -849,8 +840,7 @@ func TestWorker_UnsupportedFormat(t *testing.T) {
 }
 
 func TestWorker_BadPayload(t *testing.T) {
-	// This test doesn't touch the DB (fails on unmarshal before any query).
-	svc := &Service{}
+	svc := &Service{} // fails on unmarshal before any DB access
 	err := svc.handleJob(context.Background(), jobs.JobPayload{
 		TenantID: uuid.New(),
 		Data:     []byte("not json"),

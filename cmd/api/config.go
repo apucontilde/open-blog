@@ -10,35 +10,10 @@ import (
 	"time"
 )
 
-// Config is the single parsed form of the environment surface. Env names:
-//
-//	DATABASE_URL              postgres://...   (required)
-//	PORT                      listen port      (default 8080)
-//	SESSION_KEY               hex AES-256 key for oauth_tokens at rest (required, 64 hex chars)
-//	SESSION_COOKIE_NAME       cookie name      (default "openblog_session")
-//	COOKIE_SECURE             set Secure on the session cookie (default false)
-//	EDITOR_ORIGINS            comma-separated CORS allow-list
-//	POSTS_MEDIA_ORIGIN        <img> host allow-list for the renderer
-//	R2_ENDPOINT               S3 endpoint for R2
-//	R2_BUCKET                 bucket name
-//	R2_ACCESS_KEY_ID          credentials
-//	R2_SECRET_ACCESS_KEY      credentials
-//	R2_CDN_BASE               public media base URL
-//	MEDIA_PRESIGN_TTL         presign lifetime (default 15m)
-//	GOOGLE_OAUTH_CLIENT_ID    Google SSO client
-//	GOOGLE_OAUTH_CLIENT_SECRET
-//	GOOGLE_OAUTH_REDIRECT_URL fixed callback URL our provider registers
-//	GITHUB_OAUTH_CLIENT_ID    GitHub SSO client
-//	GITHUB_OAUTH_CLIENT_SECRET
-//	GITHUB_OAUTH_REDIRECT_URL
-//	OAUTH_REDIRECT_ALLOW      URL allow-list for the post-login redirect destination
-//	JOBS_WORKERS              job worker goroutines (default 3)
-//
-// Parsed once at startup; zero values select module defaults.
+// Config is the environment parsed once at startup; zero values select defaults.
 type Config struct {
 	DBURL    string
 	Port     int
-	Signing  oauthSigning
 	Session  sessionCfg
 	Origins  []string
 	Posts    postsCfg
@@ -48,13 +23,8 @@ type Config struct {
 	OAuthKey []byte
 }
 
-type oauthSigning struct {
-	Key []byte
-}
-
 type sessionCfg struct {
 	Name   string
-	Domain string
 	Secure bool
 }
 

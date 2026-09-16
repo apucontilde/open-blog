@@ -11,8 +11,7 @@ import (
 	"openblog/internal/store"
 )
 
-// postBody is the full single-post payload: content_html is served as the
-// render-on-publish artifact, never rendered on this path (ST-1, ST-22).
+// postBody serves content_html verbatim; the read path never renders markdown.
 type postBody struct {
 	Slug        string      `json:"slug"`
 	Title       string      `json:"title"`
@@ -23,12 +22,8 @@ type postBody struct {
 	Images      []imageItem `json:"images"`
 }
 
-// Get serves GET /public/{tenant}/posts/{slug}: exactly the published post.
-// Group-by is fixed on (p.id, u.id) with the composite-tenant LEFT JOIN and
-// jsonb_agg(pi.variants ORDER BY pi.position) — a deterministic, position
-// ordered image set even across image rows (sweep finding 14). Drafts and
-// archives yield the same 404 as an unknown slug (ST-2). ETag = hash of
-// content_html length and updated_at — cheap, stable across replicas.
+// Get serves the published post; drafts and archives 404 like unknown slugs.
+// Query contract: GROUP BY p.id, u.id with the composite-tenant LEFT JOIN and jsonb_agg ORDER BY pi.position.
 func (a *API) Get(r *http.Request, tenantSlug, postSlug string) (*Response, error) {
 	ctx := r.Context()
 	id, _, err := a.resolver.ResolveSlug(ctx, tenantSlug)
@@ -87,8 +82,6 @@ func (a *API) Get(r *http.Request, tenantSlug, postSlug string) (*Response, erro
 	return jsonResponse(http.StatusOK, body, v)
 }
 
-// decodeImages maps the aggregated variants array (one element per image row,
-// in position order) into deterministic imageItems.
 func (a *API) decodeImages(raw []byte) []imageItem {
 	var raws []json.RawMessage
 	if err := json.Unmarshal(raw, &raws); err != nil {

@@ -1,10 +1,4 @@
-// Package publicapi is the cache-friendly public read surface for reader
-// sites: GET /public/{tenant}/site, /public/{tenant}/posts and /posts/{slug}.
-// No auth, no sessions, no rate limiting — flood control is a CDN/WAF job
-// (plan 009). Only status='published' rows are served; drafts and archives
-// are indistinguishable from missing (ST-2, ST-3). content_html is the
-// render-on-publish artifact and is served verbatim: the read path never
-// renders markdown (ST-22).
+// Package publicapi is the public read surface: published-only, no auth, no app-level rate limiting.
 package publicapi
 
 import (
@@ -24,13 +18,9 @@ import (
 )
 
 const (
-	// CacheControl is shared by every public response. s-maxage bounds edge
-	// freshness; stale-while-revalidate=300 covers purge lag of ≤ one
-	// reconcile cycle (009 sweep Q2).
+	// CacheControl: s-maxage bounds edge freshness; stale-while-revalidate covers purge lag.
 	CacheControl = "public, s-maxage=60, stale-while-revalidate=300"
 
-	// defaultPageSize is the page the list index scan walks when the
-	// constructor omits one; maxPageSize caps the configurable limit.
 	defaultPageSize = 25
 	maxPageSize     = 100
 )
@@ -40,17 +30,13 @@ type tenantResolver interface {
 	ResolveSlug(ctx context.Context, slug string) (uuid.UUID, int64, error)
 }
 
-// Config carries the constructor knobs: page size, resolver TTL and the media
-// CDN origin used as the fallback base for relative variant urls.
+// Config carries the constructor knobs.
 type Config struct {
 	PageSize   int           // 0 => defaultPageSize
 	ResolveTTL time.Duration // 0 => tenancy.DefaultTTL
 	MediaCDN   string        // e.g. https://media.example.com
 }
 
-// API is the public read surface. Handlers are pure request→response funcs
-// returning a fully-formed Response; the admin mux (010) wires the routes and
-// writes them verbatim.
 type API struct {
 	db          *store.DB
 	resolver    tenantResolver
@@ -58,7 +44,6 @@ type API struct {
 	mediaOrigin string
 }
 
-// New builds an API over db; Config zero values select the defaults.
 func New(db *store.DB, cfg Config) *API {
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = defaultPageSize
@@ -74,9 +59,7 @@ func New(db *store.DB, cfg Config) *API {
 	}
 }
 
-// Response is a fully-formed HTTP response the mux writes verbatim without
-// further transformation; handlers never touch the network. Client errors are
-// encoded in Status/Body; only unexpected failures surface as Go errors.
+// Response is a fully-formed HTTP response the mux writes verbatim; client errors are encoded in Status/Body.
 type Response struct {
 	Status int
 	Header http.Header
@@ -97,7 +80,6 @@ func jsonResponse(status int, v any, etag string) (*Response, error) {
 	return &Response{Status: status, Header: h, Body: b}, nil
 }
 
-// errorResponse is the JSON-only error shape shared by every client error.
 func errorResponse(status int, msg string) *Response {
 	b, _ := json.Marshal(map[string]string{"error": msg})
 	h := make(http.Header)
@@ -106,8 +88,6 @@ func errorResponse(status int, msg string) *Response {
 	return &Response{Status: status, Header: h, Body: b}
 }
 
-// notModified honors a matching If-None-Match: 304 with the validator and
-// cache directives, no body.
 func notModified(etag string) *Response {
 	h := make(http.Header)
 	h.Set("Cache-Control", CacheControl)
@@ -115,9 +95,7 @@ func notModified(etag string) *Response {
 	return &Response{Status: http.StatusNotModified, Header: h}
 }
 
-// etag derives a deterministic, replica-stable validator from its parts:
-// hex-encoded sha256 over each part separated by NUL. The value is stable
-// across replicas because it never includes process-local state.
+// etag derives a deterministic, replica-stable validator: sha256 over NUL-separated parts.
 func etag(parts ...any) string {
 	h := sha256.New()
 	for _, p := range parts {
@@ -126,9 +104,7 @@ func etag(parts ...any) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// etagMatches implements the RFC 7232 weak comparison for If-None-Match:
-// the whole comma-separated list against one current tag, ignoring quotes,
-// a leading W/ and wildcard semantics.
+// etagMatches implements RFC 7232 weak If-None-Match comparison (quotes/W-prefix/wildcard ignored).
 func etagMatches(ifNoneMatch, current string) bool {
 	if ifNoneMatch == "" {
 		return false
@@ -147,8 +123,7 @@ func etagMatches(ifNoneMatch, current string) bool {
 	return false
 }
 
-// resolveTenant maps the shared resolver's failures to client responses;
-// unexpected errors propagate so the mux can 500 without caching the failure.
+// resolveTenant maps resolver failures to client responses; unexpected errors propagate (handled=false).
 func resolveTenant(err error) (*Response, bool) {
 	switch {
 	case errors.Is(err, tenancy.ErrInvalidSlug):

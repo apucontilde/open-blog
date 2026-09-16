@@ -25,7 +25,7 @@ const (
 	codeRateLimited  = "too_many_requests"
 )
 
-// errorEnvelope is the ONLY error shape across the API; no stack traces escape.
+// errorEnvelope is the one error shape across the API; no internals leak.
 type errorEnvelope struct {
 	Error apiError `json:"error"`
 }
@@ -41,24 +41,23 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(errorEnvelope{Error: apiError{Code: code, Message: message}})
 }
 
-// mapError maps domain errors to (status, message); anything unrecognized is a
-// 500 with no internals leaked.
+// mapError maps domain errors to (status, message); unknown errors become a 500.
 func mapError(err error) (int, string) {
 	switch {
 	case errors.Is(err, posts.ErrNotFound),
 		errors.Is(err, docimport.ErrNotFound),
 		errors.Is(err, media.ErrImageNotFound),
 		errors.Is(err, pgx.ErrNoRows):
-		return http.StatusNotFound, err.Error()
+		return http.StatusNotFound, "not found"
 	case errors.Is(err, authz.ErrForbidden), errors.Is(err, posts.ErrNoTenant):
-		return http.StatusForbidden, err.Error()
+		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, posts.ErrSlugTaken),
 		errors.Is(err, posts.ErrSlugImmutable),
 		errors.Is(err, docimport.ErrAlreadyApplied),
 		errors.Is(err, oauth.ErrIdentityTaken),
 		errors.Is(err, oauth.ErrNoInvitation),
 		errors.Is(err, auth.ErrInvited):
-		return http.StatusConflict, err.Error()
+		return http.StatusConflict, "conflict"
 	case errors.Is(err, posts.ErrEmptyContent),
 		errors.Is(err, docimport.ErrNotConverted),
 		errors.Is(err, docimport.ErrInvalidSource),
@@ -66,7 +65,7 @@ func mapError(err error) (int, string) {
 		errors.Is(err, media.ErrPayloadTooLarge),
 		errors.Is(err, oauth.ErrUnknownProvider),
 		errors.Is(err, oauth.ErrDisallowedRedirect):
-		return http.StatusUnprocessableEntity, err.Error()
+		return http.StatusUnprocessableEntity, "validation failed"
 	case errors.Is(err, oauth.ErrInvalidFlow),
 		errors.Is(err, oauth.ErrProviderDenied),
 		errors.Is(err, oauth.ErrExchangeFailed),
@@ -75,7 +74,7 @@ func mapError(err error) (int, string) {
 		errors.Is(err, oauth.ErrRefreshFailed),
 		errors.Is(err, oauth.ErrNoToken),
 		errors.Is(err, oauth.ErrScopeMissing):
-		return http.StatusUnauthorized, err.Error()
+		return http.StatusUnauthorized, "unauthorized"
 	default:
 		return http.StatusInternalServerError, "internal server error"
 	}

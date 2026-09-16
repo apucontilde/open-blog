@@ -10,12 +10,7 @@ import (
 	"openblog/internal/store"
 )
 
-// LinkIdentity idempotently links (provider, subject) to userID. A repeat
-// link to the same user is a no-op; a link to a different user is
-// ErrIdentityTaken. CALLERS MUST gate a brand-new link on verified mailbox
-// control (the SSO callback does: email == IdP verified_email) — a subject
-// already linked bypasses the gate by construction, since ownership is proven
-// by the provider itself.
+// LinkIdentity idempotently links (provider, subject) to userID; a different owner is ErrIdentityTaken. New links require verified mailbox control.
 func (o *OAuth) LinkIdentity(ctx context.Context, userID uuid.UUID, providerName, subject string) error {
 	if userID == uuid.Nil {
 		return ErrInvalidUserID
@@ -28,8 +23,6 @@ func (o *OAuth) LinkIdentity(ctx context.Context, userID uuid.UUID, providerName
 	})
 }
 
-// linkIdentityTx is the transaction-local shape of LinkIdentity; the callback
-// runs it inside its own resolveIdentity transaction.
 func linkIdentityTx(ctx context.Context, q *store.Queries, userID uuid.UUID, providerName, subject string) error {
 	existing, err := q.GetIdentity(ctx, providerName, subject)
 	if err == nil {
@@ -42,8 +35,7 @@ func linkIdentityTx(ctx context.Context, q *store.Queries, userID uuid.UUID, pro
 		return err
 	}
 	if err := q.InsertIdentity(ctx, providerName, subject, userID); err != nil {
-		// A concurrent login won the (provider, subject) PK; adopt if it is
-		// the same user, otherwise surface the conflict.
+		// A concurrent login won the (provider, subject) PK; adopt it if same user.
 		existing, err2 := q.GetIdentity(ctx, providerName, subject)
 		if err2 == nil {
 			if existing.UserID == userID {
@@ -56,11 +48,7 @@ func linkIdentityTx(ctx context.Context, q *store.Queries, userID uuid.UUID, pro
 	return nil
 }
 
-// ConsumeInvitation atomically claims exactly one live invitation for the
-// normalized email (optionally restricted to tenantID) and returns what it
-// grants. The consumed_at guard makes a repeated consume a clean
-// ErrNoInvitation — idempotent (ST-19). The caller inserts the membership with
-// the returned role.
+// ConsumeInvitation atomically claims one live invitation; a repeat is ErrNoInvitation.
 func (o *OAuth) ConsumeInvitation(ctx context.Context, email string, tenantID *uuid.UUID) (store.Invitation, error) {
 	email = normalizeEmail(email)
 	if email == "" {

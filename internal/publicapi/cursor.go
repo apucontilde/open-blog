@@ -11,28 +11,20 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrMalformedCursor is returned by decodeCursor for any cursor that is not a
-// canonical base64url-encoded {published_at, id} object: malformed cursors map
-// to 422 so the decode itself acts as the injection protection (arg binding
-// is the second layer).
+// ErrMalformedCursor maps to 422; strict decode is the first injection defense, arg binding the second.
 var ErrMalformedCursor = errors.New("publicapi: malformed cursor")
 
-// Cursor is the keyset position (published_at, id). The list walks the 001
-// index (tenant_id, status, published_at desc, id desc) as a pure range scan
-// strictly before this tuple — no OFFSET, stable under concurrent writes.
+// Cursor is the keyset position (published_at, id) for a strictly-before range scan — no OFFSET.
 type Cursor struct {
 	PublishedAt time.Time `json:"published_at"`
 	ID          uuid.UUID `json:"id"`
 }
 
-// encodeCursor serializes a keyset position opaque to clients (base64url).
 func encodeCursor(c Cursor) string {
 	b, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeCursor parses a client-supplied cursor. Anything that is not a
-// well-formed, complete (published_at, id) tuple is ErrMalformedCursor.
 func decodeCursor(s string) (Cursor, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
@@ -48,10 +40,7 @@ func decodeCursor(s string) (Cursor, error) {
 	return c, nil
 }
 
-// listStatement builds the keyset list query and its args. $1 is the tenant
-// id; an optional tag containment probe and cursor tuple follow; the final
-// arg is limit = pageSize+1 so the caller can detect a next page. The cursor
-// tuple keeps the whole scan on the composite index (sweep finding 10).
+// listStatement builds the keyset query; the final arg is limit=pageSize+1 so the caller can detect a next page.
 func listStatement(tenantID uuid.UUID, pageSize int, tag string, cur *Cursor) (string, []any) {
 	var sb strings.Builder
 	sb.WriteString("select id, slug, title, excerpt, published_at, metadata\nfrom posts\nwhere tenant_id = $1 and status = 'published'")
@@ -69,8 +58,7 @@ func listStatement(tenantID uuid.UUID, pageSize int, tag string, cur *Cursor) (s
 	return sb.String(), args
 }
 
-// mustTagJSON renders the ?tag= containment probe {"tags":[$tag]}, backed by
-// the 001 GIN metadata index; marshal of our own fixed shape cannot fail.
+// mustTagJSON renders {"tags":[tag]}, the GIN metadata containment probe.
 func mustTagJSON(tag string) string {
 	b, _ := json.Marshal(map[string]any{"tags": []string{tag}})
 	return string(b)

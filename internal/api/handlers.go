@@ -22,8 +22,7 @@ import (
 	"openblog/internal/tenancy"
 )
 
-// decodeJSON decodes one JSON value with unknown fields rejected so client
-// typos fail loudly instead of being silently dropped.
+// decodeJSON decodes one JSON value with unknown fields rejected.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	dec.DisallowUnknownFields()
@@ -84,8 +83,6 @@ func hashToken(t string) []byte {
 	return h[:]
 }
 
-// --- auth entry ---
-
 type credsRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -141,13 +138,10 @@ func (s *server) setSession(w http.ResponseWriter, token string) {
 }
 
 func (s *server) clearSession(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name: s.sessionName, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: s.sessionSecure, SameSite: http.SameSiteLaxMode,
-	})
+	c := s.sessionCookie("")
+	c.MaxAge = -1
+	http.SetCookie(w, c)
 }
-
-// --- oauth ---
 
 func (s *server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if s.oauth == nil {
@@ -174,9 +168,7 @@ func (s *server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"url": url})
 }
 
-// handleOAuthCallback is the GET callback the IdP redirects to. It verifies
-// the replayed state, completes the PKCE exchange, resolves/links the identity,
-// consumes a first-link invitation, and sets the fresh session cookie.
+// handleOAuthCallback is the GET redirect target: state check, PKCE exchange, session.
 func (s *server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.oauth == nil {
 		writeError(w, http.StatusNotFound, codeNotFound, "oauth not configured")
@@ -198,8 +190,6 @@ func (s *server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		"redirect": res.Redirect,
 	})
 }
-
-// --- admin: session + me ---
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	_ = s.session.Logout(r.Context(), tokenFrom(r))
@@ -232,9 +222,7 @@ func nilOrUUID(id uuid.UUID) any {
 	return id
 }
 
-// handleSetTenant switches the session's active tenant (ST-20). It runs on a
-// verified session even before an actor is resolvable: the switcher is the
-// path that turns a tenant-less session into a scoped one.
+// handleSetTenant switches the session's active tenant (ST-20) before an actor resolves.
 func (s *server) handleSetTenant(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TenantID uuid.UUID `json:"tenant_id"`
@@ -261,8 +249,6 @@ func (s *server) handleSetTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": req.TenantID})
 }
-
-// --- admin: posts ---
 
 type postOut struct {
 	ID              uuid.UUID       `json:"id"`
@@ -322,7 +308,7 @@ func (s *server) handlePostsCreate(w http.ResponseWriter, r *http.Request) {
 		Slug            string          `json:"slug"`
 		Excerpt         string          `json:"excerpt"`
 		Metadata        json.RawMessage `json:"metadata"`
-		// client-supplied tenant_id is IGNORED (ST-5): scope comes from actor.
+		// client-supplied tenant_id is IGNORED (ST-5): scope comes from the actor.
 		TenantID *uuid.UUID `json:"tenant_id"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -437,8 +423,6 @@ func (s *server) handlePostsUnpublish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, postOutFrom(p))
 }
 
-// --- admin: media ---
-
 func (s *server) handleMediaPresign(w http.ResponseWriter, r *http.Request) {
 	a := actorFrom(r)
 	if err := authz.Require(a, authz.CapUploadMedia); err != nil {
@@ -452,7 +436,6 @@ func (s *server) handleMediaPresign(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		PostID   uuid.UUID `json:"post_id"`
-		Slug     string    `json:"slug"`
 		Filename string    `json:"filename"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -463,7 +446,7 @@ func (s *server) handleMediaPresign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, codeValidation, "post_id and filename are required")
 		return
 	}
-	up, err := s.media.Presign(scope.TenantID, req.PostID, req.Slug, req.Filename, time.Now())
+	up, err := s.media.Presign(scope.TenantID, req.PostID, req.Filename, time.Now())
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -525,8 +508,6 @@ func (s *server) handleMediaDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
-// --- admin: imports ---
 
 func (s *server) handleImportsStart(w http.ResponseWriter, r *http.Request) {
 	a := actorFrom(r)
@@ -605,8 +586,6 @@ func (s *server) handleImportsApply(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, postOutFrom(p))
 }
-
-// --- admin: members ---
 
 func (s *server) requireTenantScope(w http.ResponseWriter, a authz.Actor) bool {
 	if a.Platform || a.Tenant == nil {
@@ -767,8 +746,6 @@ func (s *server) handleMembersRemove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// --- admin: tenants (ST-16/ST-17) ---
-
 type tenantOut struct {
 	ID             uuid.UUID       `json:"id"`
 	Slug           string          `json:"slug"`
@@ -790,8 +767,7 @@ func tenantOutFrom(t store.Tenant) tenantOut {
 	}
 }
 
-// tenantManageable reports whether the actor can manage tenant id: platform
-// super-admin, or the tenant's own owner (ST-15/ST-17).
+// tenantManageable: platform super-admin, or the tenant's own owner (ST-15/ST-17).
 func tenantManageable(a authz.Actor, id uuid.UUID) bool {
 	if a.Platform {
 		return true
@@ -799,6 +775,7 @@ func tenantManageable(a authz.Actor, id uuid.UUID) bool {
 	return a.Tenant != nil && *a.Tenant == id && a.Role == authz.RoleOwner
 }
 
+// tenant list/create are platform-only; get/update/delete are owner-or-superadmin.
 func (s *server) handleTenantsList(w http.ResponseWriter, r *http.Request) {
 	if !actorFrom(r).Platform {
 		writeError(w, http.StatusForbidden, codeForbidden, "platform role required")
@@ -923,8 +900,7 @@ func (s *server) handleTenantsUpdate(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		// A settings change is public-visible content: bump content_version and
-		// enqueue the same-tx CDN purge (sweep finding 7, plan §Middleware).
+		// settings are public-visible: bump content_version, enqueue same-tx purge.
 		_, e = jobs.Enqueue(r.Context(), q.Tx(), posts.PurgeJobKind, id.String(), jobs.JobPayload{
 			TenantID: id,
 			Data: mustJSON(struct {

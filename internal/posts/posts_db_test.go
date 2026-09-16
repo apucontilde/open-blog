@@ -21,9 +21,8 @@ import (
 	"openblog/migrations"
 )
 
-// DB-backed contract tests, per the repo convention: skip unless DATABASE_URL
-// is set, provision a scratch DB owned by the non-superuser blog_app role so
-// RLS bites, and replay the embedded migrations.
+// DB tests skip without DATABASE_URL; a scratch DB owned by non-superuser
+// blog_app makes RLS bite.
 
 const (
 	appRole     = "blog_app"
@@ -106,8 +105,7 @@ func newPostsScratchDB(t *testing.T) *postsDB {
 	return &postsDB{db: store.NewFromPool(pool), pool: pool}
 }
 
-// fixture lands three members in two tenants, exactly mirroring the media DB
-// tests' shape so cross-tenant and ownership rules are exercised for real.
+// fixture lands three members in two tenants, mirroring the media DB tests.
 type fixture struct {
 	pd      *postsDB
 	tA, tB  uuid.UUID // tenants
@@ -617,9 +615,8 @@ func TestServiceRenderedHTMLSanitized(t *testing.T) {
 	}
 }
 
-// TestServiceRollbackDiscardsBumpAndPurge replicates the publish sequence
-// inside a failing transaction: the bump and the enqueued purge must both
-// roll back with the status change (008 sweep finding 9).
+// TestServiceRollbackDiscardsBumpAndPurge: the bump and enqueued purge roll
+// back with the status change.
 func TestServiceRollbackDiscardsBumpAndPurge(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

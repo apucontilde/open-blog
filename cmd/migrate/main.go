@@ -1,4 +1,3 @@
-// Command migrate applies the embedded goose migrations to $DATABASE_URL.
 package main
 
 import (
@@ -8,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the pgx database/sql driver
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the database/sql driver
 	"github.com/pressly/goose/v3"
 
 	"openblog/migrations"

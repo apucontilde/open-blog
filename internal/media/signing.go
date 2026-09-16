@@ -12,25 +12,20 @@ import (
 	"time"
 )
 
-// Presigned PUT signing — hand-rolled SigV4 against the R2 S3-compatible
-// endpoint (no AWS SDK; keeps deps lean). Only the host header is signed and
-// the payload hash is UNSIGNED-PAYLOAD, so a PUT with x-amz-content-sha256
-// unset and any body succeeds under the presign.
+// Hand-rolled SigV4 presigning against R2's S3-compatible endpoint (no AWS SDK).
+// Only the host header is signed and the payload hash is UNSIGNED-PAYLOAD, so a
+// presigned PUT carries any body.
 
 const signingAlgorithm = "AWS4-HMAC-SHA256"
 const unsignedPayload = "UNSIGNED-PAYLOAD"
 
-// PresignPutURL returns the presigned PUT URL for key on the R2 endpoint with
-// region "auto" (R2's S3-compatible region convention). R2 serves path-style
-// URLs: https://<account>.r2.cloudflarestorage.com/<bucket>/<key>, so the
-// canonical URI embeds the bucket. expiry bounds the URL lifetime; the
-// signature is pinned to now.
+// PresignPutURL presigns a path-style PUT (bucket in the canonical URI) with
+// region "auto"; the signature is pinned to now.
 func PresignPutURL(endpoint, bucket, key, accessKey, secretKey string, now time.Time, expiry time.Duration) (string, error) {
 	return PresignPutURLWithRegion(endpoint, bucket, key, accessKey, secretKey, "auto", now, expiry)
 }
 
-// PresignPutURLWithRegion is PresignPutURL with an explicit region, exposed
-// for the SigV4 vector tests.
+// PresignPutURLWithRegion exposes an explicit region for the SigV4 vector tests.
 func PresignPutURLWithRegion(endpoint, bucket, key, accessKey, secretKey, region string, now time.Time, expiry time.Duration) (string, error) {
 	ep, err := url.Parse(endpoint)
 	if err != nil {
@@ -52,7 +47,7 @@ func PresignPutURLWithRegion(endpoint, bucket, key, accessKey, secretKey, region
 		{"X-Amz-SignedHeaders", "host"},
 	})
 
-	sig := presignedSignature(accessKey, secretKey, region, now, expiry,
+	sig := presignedSignature(accessKey, secretKey, region, now,
 		http.MethodPut, ep.Host, canonicalURI, query)
 
 	u := *ep
@@ -66,12 +61,10 @@ func credentialScope(now time.Time, region string) string {
 	return now.UTC().Format("20060102") + "/" + region + "/s3/aws4_request"
 }
 
-// presignedSignature is the core SigV4 query-parameter signature for one
-// request (method, host, canonical URI, canonical query). It is independent
-// of how the bucket appears in the URI, so it can be pinned to the AWS docs'
-// exact example vector. Only the host header is signed and the payload hash
-// is UNSIGNED-PAYLOAD (a presigned PUT may carry any body).
-func presignedSignature(accessKey, secretKey, region string, now time.Time, expiry time.Duration, method, host, canonicalURI, canonicalQuery string) string {
+// presignedSignature builds the SigV4 query-param signature; it is independent
+// of how the bucket appears in the URI, so it pins to the AWS docs' exact
+// example vector.
+func presignedSignature(accessKey, secretKey, region string, now time.Time, method, host, canonicalURI, canonicalQuery string) string {
 	timeStr := now.UTC().Format("20060102T150405Z")
 	dateStr := now.UTC().Format("20060102")
 	scope := credentialScope(now, region)

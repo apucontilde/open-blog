@@ -1,6 +1,3 @@
-// Package docimport handles async document conversion (PDF/DOCX/Google Docs/
-// open formats → markdown) via the job worker and the apply-to-draft path.
-// No HTTP — 010 owns handlers.
 package docimport
 
 import (
@@ -11,6 +8,7 @@ import (
 	"mime"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,11 +22,9 @@ import (
 )
 
 const (
-	// JobKind is the job queue kind for import conversions.
 	JobKind = "import"
 )
 
-// SourceKind distinguishes multipart file uploads from Google Docs.
 type SourceKind int
 
 const (
@@ -36,7 +32,6 @@ const (
 	SourceGoogleDocs
 )
 
-// Source describes what the user submitted to POST /admin/imports.
 type Source struct {
 	Kind     SourceKind
 	File     []byte // multipart file bytes (SourceMultipart)
@@ -45,10 +40,7 @@ type Source struct {
 	DocID    string // Google Doc ID (SourceGoogleDocs)
 }
 
-// Start creates the imports row AND enqueues the "import" job in the same
-// transaction. The original file is stored in R2 via the media presign
-// scheme (reused signing, no mime/size gate). Returns immediately with
-// status="converting".
+// Start inserts the imports row and enqueues the "import" job in the same tx, storing the original in R2.
 func (s *Service) Start(ctx context.Context, actor authz.Actor, source Source) (uuid.UUID, error) {
 	if err := authz.Require(actor, authz.CapRunImport); err != nil {
 		return uuid.Nil, err
@@ -82,7 +74,7 @@ func (s *Service) Start(ctx context.Context, actor authz.Actor, source Source) (
 			return uuid.Nil, fmt.Errorf("import: mint key id: %w", err)
 		}
 		sourceKey = fmt.Sprintf("%s/imports/%s/%s%s", tenantSlug, importID, objID, ext)
-		if err := uploadR2(ctx, s.r2, sourceKey, source.File); err != nil {
+		if err := s.r2.Put(ctx, sourceKey, source.File); err != nil {
 			return uuid.Nil, fmt.Errorf("import: upload original: %w", err)
 		}
 		jobPayload = importPayload{
@@ -116,7 +108,6 @@ func (s *Service) Start(ctx context.Context, actor authz.Actor, source Source) (
 	return importID, err
 }
 
-// Get returns the current state of an import for the poll/preview endpoint.
 func (s *Service) Get(ctx context.Context, actor authz.Actor, importID uuid.UUID) (ImportResult, error) {
 	scope := authz.ScopeFromActor(actor)
 	var imp store.Import
@@ -148,8 +139,6 @@ func (s *Service) Get(ctx context.Context, actor authz.Actor, importID uuid.UUID
 	return res, nil
 }
 
-// ImportResult is the wire shape for Get: status, converted markdown preview,
-// fidelity level, and any conversion error.
 type ImportResult struct {
 	ID       uuid.UUID          `json:"id"`
 	Status   store.ImportStatus `json:"status"`
@@ -158,12 +147,9 @@ type ImportResult struct {
 	Error    *string            `json:"error,omitempty"`
 }
 
-// Apply creates a draft post from the converted markdown via 005's
-// posts.Create (its renderer renders + sanitizes hostile content, and its
-// uniqueSlug uniquifies the derived slug). Idempotency gate: post_id IS NOT
-// NULL → 409 (ErrAlreadyApplied). When the produced draft is deleted,
-// imports.post_id is NULLed by the FK and re-apply creates a fresh draft (the
-// recoverable path). Never re-converts an applied import.
+// Apply creates a draft via posts.Create (005 renders + sanitizes untrusted content).
+// post_id already set → ErrAlreadyApplied (409); deleting the draft nulls the FK and re-apply is allowed.
+// An applied import is never re-converted.
 func (s *Service) Apply(ctx context.Context, actor authz.Actor, importID uuid.UUID) (store.Post, error) {
 	if err := authz.Require(actor, authz.CapRunImport); err != nil {
 		return store.Post{}, err
@@ -195,8 +181,7 @@ func (s *Service) Apply(ctx context.Context, actor authz.Actor, importID uuid.UU
 		return store.Post{}, err
 	}
 
-	// CAS-link the import to the draft: only a NULL post_id may be claimed,
-	// so a concurrent Apply that created its own draft loses the race.
+	// CAS-link: only a NULL post_id can be claimed, so a concurrent Apply loses the race.
 	err = s.db.ScopedRW(ctx, scope, func(q *store.Queries) error {
 		if err := q.SetImportPostID(ctx, importID, post.ID); err != nil {
 			return ErrAlreadyApplied // another apply won the race
@@ -212,8 +197,7 @@ func (s *Service) Apply(ctx context.Context, actor authz.Actor, importID uuid.UU
 	return post, nil
 }
 
-// applyGate is the pure idempotency gate: an import may be applied only when
-// it converted successfully, carries markdown, and is not already linked.
+// applyGate allows apply only when conversion succeeded with markdown and no draft is linked.
 func applyGate(imp store.Import) error {
 	if imp.Status != store.ImportDone {
 		return ErrNotConverted
@@ -227,7 +211,6 @@ func applyGate(imp store.Import) error {
 	return nil
 }
 
-// RegisterWorker binds the "import" job handler to w.
 func (s *Service) RegisterWorker(w *jobs.Worker, getGoogleToken oauth.GoogleExporter) {
 	s.getGoogleToken = getGoogleToken
 	w.Register(JobKind, s.handleJob)
@@ -274,7 +257,7 @@ func (s *Service) handleJob(ctx context.Context, p jobs.JobPayload) error {
 		}
 		md, fidelity, convErr = gdocExport(ctx, payload.GDocID, accessToken)
 	default:
-		orig, err := s.fetchOriginal(ctx, payload.SourceKey)
+		orig, err := s.r2.Get(ctx, payload.SourceKey)
 		if err != nil {
 			return fmt.Errorf("import: fetch original from R2: %w", err)
 		}
@@ -308,11 +291,6 @@ func (s *Service) handleJob(ctx context.Context, p jobs.JobPayload) error {
 	})
 }
 
-func (s *Service) fetchOriginal(ctx context.Context, key string) ([]byte, error) {
-	return s.r2.Get(ctx, key)
-}
-
-// importPayload is the Data slot of the jobs.JobPayload for import jobs.
 type importPayload struct {
 	ImportID     uuid.UUID `json:"import_id"`
 	SourceFormat string    `json:"source_format"`
@@ -320,15 +298,12 @@ type importPayload struct {
 	GDocID       string    `json:"gdoc_id,omitempty"`
 }
 
-// R2Put is the minimal R2 surface the import service needs: PUT the original
-// upload, GET it back for the worker conversion. media's *R2Client satisfies
-// it (reused, no HTTP/presign cruft).
+// R2Put is the minimal R2 surface the service needs; media's *R2Client satisfies it.
 type R2Put interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
 }
 
-// Service is the import domain service.
 type Service struct {
 	db             *store.DB
 	posts          *posts.Service
@@ -337,7 +312,6 @@ type Service struct {
 	getGoogleToken oauth.GoogleExporter
 }
 
-// Config carries constructor-injected settings; 010 parses env into it.
 type Config struct {
 	DB         *pgxpool.Pool
 	R2         R2Put
@@ -345,7 +319,6 @@ type Config struct {
 	Posts      *posts.Service
 }
 
-// New builds a Service over cfg.
 func New(cfg Config) *Service {
 	if cfg.Posts == nil {
 		cfg.Posts = posts.New(store.NewFromPool(cfg.DB), posts.Config{})
@@ -357,8 +330,6 @@ func New(cfg Config) *Service {
 		tenantSlug: cfg.TenantSlug,
 	}
 }
-
-// --- helpers ---
 
 func parseSource(source Source) (ext, format string, err error) {
 	switch source.Kind {
@@ -404,10 +375,6 @@ func extFromMimeOrName(mimeType, filename string) string {
 	return ""
 }
 
-func uploadR2(ctx context.Context, r2 R2Put, key string, data []byte) error {
-	return r2.Put(ctx, key, data)
-}
-
 func deriveSlug(content string, importID uuid.UUID) string {
 	title := titleFromContent(content)
 	if title == "" {
@@ -426,7 +393,7 @@ func deriveSlug(content string, importID uuid.UUID) string {
 	}, title)
 	slug = strings.Trim(slug, "-")
 	if len(slug) > 63 {
-		// Trim AGAIN after truncation: a trailing '-' fails the DB slug CHECK.
+		// re-trim: a trailing '-' fails the DB slug CHECK.
 		slug = strings.TrimRight(slug[:63], "-")
 	}
 	if slug == "" {
@@ -443,7 +410,11 @@ func titleFromContent(content string) string {
 		}
 		line = strings.TrimPrefix(line, "# ")
 		if len(line) > 200 {
-			line = line[:200]
+			cut := 200
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = line[:cut]
 		}
 		return line
 	}

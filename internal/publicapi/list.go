@@ -11,8 +11,7 @@ import (
 	"openblog/internal/store"
 )
 
-// listRow is one projected keyset row of the list: metadata only, never the
-// markdown body or content_html (plan: metadata-only payload, ST-4).
+// listRow is the metadata-only projection (never the body or content_html).
 type listRow struct {
 	id          uuid.UUID
 	slug        string
@@ -22,15 +21,13 @@ type listRow struct {
 	metadata    []byte
 }
 
-// listBody is the paginated list envelope; next_cursor is the keyset position
-// of the last returned post and is omitted on the final page.
+// listBody omits next_cursor on the final page.
 type listBody struct {
 	Posts      []listPost `json:"posts"`
 	NextCursor string     `json:"next_cursor,omitempty"`
 }
 
-// listPost is one item of a public listing. Images carries at most the first
-// (lowest position) attachment so reader UIs get a featured image cheaply.
+// listPost's Images carries at most the lowest-position attachment.
 type listPost struct {
 	Slug        string          `json:"slug"`
 	Title       string          `json:"title"`
@@ -40,11 +37,8 @@ type listPost struct {
 	Images      []imageItem     `json:"images"`
 }
 
-// List serves GET /public/{tenant}/posts: published-only, newest-first,
-// keyset-paginated via ?before=, optionally filtered by ?tag=. Runs as an
-// index range scan plus one first-image read per page — no OFFSET, no loop
-// queries (ST-4, ST-22). ETag includes the fresh content_version so any bump
-// invalidates every page of the tenant.
+// List serves published posts newest-first with keyset pagination (?before=) and optional ?tag=.
+// The ETag includes the tenant's content_version, so any bump invalidates every page.
 func (a *API) List(r *http.Request, tenantSlug string) (*Response, error) {
 	ctx := r.Context()
 	id, _, err := a.resolver.ResolveSlug(ctx, tenantSlug)
@@ -81,8 +75,7 @@ func (a *API) List(r *http.Request, tenantSlug string) (*Response, error) {
 
 	var next string
 	if hasMore {
-		// published rows always carry published_at; a next page is only
-		// advertised when the anchor is present.
+		// published rows always carry published_at; advertise a next page only when the anchor exists.
 		last := page[len(page)-1]
 		if last.publishedAt != nil {
 			next = encodeCursor(Cursor{PublishedAt: *last.publishedAt, ID: last.id})
@@ -118,8 +111,7 @@ func (a *API) List(r *http.Request, tenantSlug string) (*Response, error) {
 	return jsonResponse(http.StatusOK, body, v)
 }
 
-// fetchPage runs the list scan and the tenant's fresh content_version in one
-// read-only scope: one range scan + one point read, never more.
+// fetchPage runs the list scan and the tenant's content_version in one read scope.
 func (a *API) fetchPage(ctx context.Context, tenantID uuid.UUID, tag string, cur *Cursor, version *int64) ([]listRow, error) {
 	stmt, args := listStatement(tenantID, a.pageSize, tag, cur)
 	var rows []listRow
@@ -146,8 +138,7 @@ func (a *API) fetchPage(ctx context.Context, tenantID uuid.UUID, tag string, cur
 	return rows, err
 }
 
-// fetchFirstImages reads the (at most) first image per page post, ordered by
-// position — a single set read, no per-post queries.
+// fetchFirstImages reads the lowest-position image per page post in one set read.
 func (a *API) fetchFirstImages(ctx context.Context, tenantID uuid.UUID, rows []listRow) (map[uuid.UUID][]imageItem, error) {
 	out := make(map[uuid.UUID][]imageItem, len(rows))
 	if len(rows) == 0 {
@@ -183,6 +174,7 @@ func (a *API) fetchFirstImages(ctx context.Context, tenantID uuid.UUID, rows []l
 	return out, err
 }
 
+// firstImageSlice ensures an empty images field marshals as [] not null.
 func firstImageSlice(imgs []imageItem) []imageItem {
 	if imgs == nil {
 		return []imageItem{}

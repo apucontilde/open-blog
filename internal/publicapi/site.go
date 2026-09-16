@@ -11,17 +11,14 @@ import (
 	"openblog/internal/store"
 )
 
-// siteBody is the reader-site bootstrap payload: branding nav + settings.
-// content_version rides along so reader UIs can key their own caches off the
-// same ETag anchor the CDN purge uses (009 sweep finding 6).
+// siteBody carries content_version as the ETag anchor.
 type siteBody struct {
 	Name           string          `json:"name"`
 	Settings       json.RawMessage `json:"settings"`
 	ContentVersion int64           `json:"content_version"`
 }
 
-// Site serves GET /public/{tenant}/site: tenant name + settings with an ETag
-// of hash(content_version, updated_at) — the tenant-global generation tag.
+// Site serves tenant name + settings; ETag = hash(content_version, updated_at).
 func (a *API) Site(r *http.Request, tenantSlug string) (*Response, error) {
 	ctx := r.Context()
 	id, _, err := a.resolver.ResolveSlug(ctx, tenantSlug)
@@ -45,7 +42,7 @@ func (a *API) Site(r *http.Request, tenantSlug string) (*Response, error) {
 		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		// tenant deleted between the resolver's cache and this read.
+		// tenant deleted between the resolver cache and this read.
 		return errorResponse(http.StatusNotFound, "tenant not found"), nil
 	}
 	if err != nil {

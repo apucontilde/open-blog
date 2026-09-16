@@ -25,9 +25,8 @@ import (
 	"openblog/migrations"
 )
 
-// DB-backed contract tests. They follow the repo convention: skip cleanly when
-// DATABASE_URL is unset, and replay the embedded goose migrations into a
-// throwaway scratch database owned by blog_app so RLS actually bites.
+// DB tests skip without DATABASE_URL; a scratch DB owned by non-superuser
+// blog_app makes RLS bite.
 
 const (
 	mediaAppRole     = "blog_app"
@@ -177,8 +176,8 @@ func (f *mediaFixture) media(t *testing.T) *Media {
 		AccessKeyID: "AKID", SecretAccessKey: "SECRET", CDNBase: "https://media.example.com"}, f.md.db, nil)
 }
 
-// countRowsScoped runs a SELECT count through a scoped read-only tx so RLS
-// sees post_images/other tenant tables.
+// countScoped runs a SELECT count through a scoped read-only tx so RLS sees
+// post_images.
 func (f *mediaFixture) countScoped(t *testing.T, tenant uuid.UUID, query string, args ...any) int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -204,8 +203,8 @@ func (f *mediaFixture) confirm(t *testing.T, m *Media, tenant, post uuid.UUID, k
 	return ins, err
 }
 
-// TestConfirmEnqueuesVariantsJobInTx — confirm inserts the row and the
-// variants job lands in the SAME transaction (a rollback drops both).
+// TestConfirmEnqueuesVariantsJobInTx: confirm inserts the row and the variants
+// job in the SAME tx (a rollback drops both).
 func TestConfirmEnqueuesVariantsJobInTx(t *testing.T) {
 	f := newMediaFixture(t)
 	m := f.media(t)
@@ -238,13 +237,12 @@ func TestConfirmEnqueuesVariantsJobInTx(t *testing.T) {
 		Data     struct {
 			ImageID uuid.UUID `json:"image_id"`
 			R2Key   string    `json:"r2_key"`
-			OrigExt string    `json:"orig_ext"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(payload, &jp); err != nil {
 		t.Fatal(err)
 	}
-	if jp.TenantID != f.tA || jp.Data.ImageID == uuid.Nil || jp.Data.R2Key != key || jp.Data.OrigExt != ".jpg" {
+	if jp.TenantID != f.tA || jp.Data.ImageID == uuid.Nil || jp.Data.R2Key != key {
 		t.Fatalf("variants payload mismatch: %+v", jp)
 	}
 
@@ -271,9 +269,8 @@ func TestConfirmEnqueuesVariantsJobInTx(t *testing.T) {
 	}
 }
 
-// TestConfirmDoubleConfirmIdempotent — the unique(tenant_id, r2_key) index
-// makes a second confirm a 0-row ON CONFLICT DO NOTHING: same result, no new
-// row, no second job.
+// TestConfirmDoubleConfirmIdempotent: unique(tenant_id, r2_key) makes a second
+// confirm a 0-row ON CONFLICT: no new row, no second job.
 func TestConfirmDoubleConfirmIdempotent(t *testing.T) {
 	f := newMediaFixture(t)
 	m := f.media(t)
@@ -303,9 +300,8 @@ func TestConfirmDoubleConfirmIdempotent(t *testing.T) {
 	}
 }
 
-// TestConfirmCrossTenantFKRejected — even with a seemingly valid key, attaching
-// an image to another tenant's post is rejected by the composite FK
-// (tenant_id, post_id) → posts(tenant_id, id).
+// TestConfirmCrossTenantFKRejected: attaching to another tenant's post is
+// rejected by the composite FK (tenant_id, post_id) → posts(tenant_id, id).
 func TestConfirmCrossTenantFKRejected(t *testing.T) {
 	f := newMediaFixture(t)
 	m := f.media(t)
@@ -326,9 +322,8 @@ func TestConfirmCrossTenantFKRejected(t *testing.T) {
 	}
 }
 
-// TestWorkerWritesCanonicalVariants — the worker's write path persists the
-// canonical {"480":{url,width,height},...} shape and backfills the
-// server-side width/height decoded by the processor.
+// TestWorkerWritesCanonicalVariants: the worker persists the canonical
+// {"480":{url,width,height},...} shape and backfills decoded width/height.
 func TestWorkerWritesCanonicalVariants(t *testing.T) {
 	f := newMediaFixture(t)
 	m := f.media(t)

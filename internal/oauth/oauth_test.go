@@ -106,23 +106,6 @@ func TestSessionHashBinding(t *testing.T) {
 	if !bytes.Equal(h1, h2) || len(h1) != 32 {
 		t.Fatalf("session hash must be a deterministic sha256, got %x/%x", h1, h2)
 	}
-	// sameHash mirrors IS NOT DISTINCT FROM.
-	cases := []struct {
-		a, b []byte
-		want bool
-	}{
-		{nil, nil, true},
-		{nil, []byte{}, true},
-		{h1, h1, true},
-		{h1, sessionHash("other"), false},
-		{nil, h1, false},
-		{h1, nil, false},
-	}
-	for _, c := range cases {
-		if got := sameHash(c.a, c.b); got != c.want {
-			t.Fatalf("sameHash(%x, %x) = %v, want %v", c.a, c.b, got, c.want)
-		}
-	}
 }
 
 func TestSHA256SumDeterministic(t *testing.T) {

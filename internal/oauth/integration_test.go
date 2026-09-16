@@ -16,8 +16,7 @@ import (
 	"openblog/internal/store"
 )
 
-// testOAuth builds a service over DATABASE_URL (already migrated by
-// cmd/migrate); skipped when unset — the pure-logic tests still run.
+// testOAuth builds a service over DATABASE_URL; skipped when unset.
 func testOAuth(t *testing.T) *OAuth {
 	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
@@ -83,7 +82,7 @@ func TestStartPersistsHashedStateAndSessionBinding(t *testing.T) {
 	ctx := context.Background()
 	sess := "pre-login-session-token"
 
-	// Start returns a consent URL; the raw state must never be stored as-is.
+	// Start persists only the hashed state.
 	loginURL, err := o.Start(ctx, ProviderGoogle, "https://ok.example/app/dashboard", sess)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -97,7 +96,7 @@ func TestStartPersistsHashedStateAndSessionBinding(t *testing.T) {
 	}
 	rawState := u.Query().Get("state")
 
-	// Consuming by the RAW state finds nothing (only the sha256 is stored)...
+	// Raw state matches nothing; only the sha256 is stored...
 	err = o.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
 		_, err := q.ConsumeOAuthFlow(ctx, []byte(rawState), sessionHash(sess))
 		return err
@@ -105,7 +104,7 @@ func TestStartPersistsHashedStateAndSessionBinding(t *testing.T) {
 	if !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("raw state matched a stored flow: %v", err)
 	}
-	// ...but the hashed state + bound session consumes the row.
+	// ...and the hashed state plus bound session consumes the row.
 	if err := o.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
 		_, err := q.ConsumeOAuthFlow(ctx, sha256Sum([]byte(rawState)), sessionHash(sess))
 		return err
@@ -113,7 +112,7 @@ func TestStartPersistsHashedStateAndSessionBinding(t *testing.T) {
 		t.Fatalf("hashed state consume: %v", err)
 	}
 
-	// Fresh flow: a mismatched bound session is rejected before any IdP call.
+	// Mismatched bound session is rejected before any IdP call.
 	loginURL2, err := o.Start(ctx, ProviderGoogle, "https://ok.example/app/dashboard", sess)
 	if err != nil {
 		t.Fatalf("second Start: %v", err)
@@ -125,12 +124,11 @@ func TestStartPersistsHashedStateAndSessionBinding(t *testing.T) {
 	if _, err := o.Callback(ctx, rawState2.Query().Get("state"), "", "attacker-session"); !errors.Is(err, ErrInvalidFlow) {
 		t.Fatalf("session mismatch = %v, want ErrInvalidFlow", err)
 	}
-	// Correct bound session consumes the flow; empty code (IdP denied) is
-	// handled without any IdP traffic.
+	// Correct session consumes the flow; empty code (IdP denied) does no IdP traffic.
 	if _, err := o.Callback(ctx, rawState2.Query().Get("state"), "", sess); !errors.Is(err, ErrProviderDenied) {
 		t.Fatalf("denied callback = %v, want ErrProviderDenied", err)
 	}
-	// The consumed state is single-use: replay fails.
+	// Single-use: replay fails.
 	if _, err := o.Callback(ctx, rawState2.Query().Get("state"), "code", sess); !errors.Is(err, ErrInvalidFlow) {
 		t.Fatalf("replay = %v, want ErrInvalidFlow", err)
 	}
@@ -153,7 +151,7 @@ func TestConsumeInvitationAtomicIdempotentAndScoped(t *testing.T) {
 	if inv.TenantID != tenantA || inv.Role != "editor" {
 		t.Fatalf("first consume = %+v, want {tenantA editor}", inv)
 	}
-	// Double-consume of the same tenant is an idempotent no-op.
+	// Double-consume is an idempotent no-op.
 	if _, err := o.ConsumeInvitation(ctx, email, &tenantA); !errors.Is(err, ErrNoInvitation) {
 		t.Fatalf("double consume A = %v, want ErrNoInvitation", err)
 	}
@@ -169,9 +167,7 @@ func TestConsumeInvitationAtomicIdempotentAndScoped(t *testing.T) {
 		t.Fatalf("consume after all consumed = %v, want ErrNoInvitation", err)
 	}
 
-	// The callback path grants the invited membership exactly once: a fresh
-	// live invite consumed and membershipped in one transaction, then a
-	// repeat membership insert is absorbed by ON CONFLICT DO NOTHING.
+	// Callback path grants the invited membership exactly once.
 	user := createUser(t, o, email)
 	insertInvitation(t, o, tenantA, email, "editor")
 	if err := o.store.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
@@ -263,7 +259,6 @@ func TestGetGoogleTokenScopeGateAndRefresh(t *testing.T) {
 		}, used: &used}
 	}
 
-	// No stored token.
 	if _, err := o.GetGoogleToken(ctx, user, false); !errors.Is(err, ErrNoToken) {
 		t.Fatalf("no token = %v, want ErrNoToken", err)
 	}
@@ -348,7 +343,7 @@ func TestGetGoogleTokenScopeGateAndRefresh(t *testing.T) {
 		t.Fatalf("refresh failure = %v, want ErrRefreshFailed", err)
 	}
 
-	// Expired token with NO stored refresh token cannot refresh.
+	// Expired token with no stored refresh token cannot refresh.
 	exp = time.Now().Add(-time.Minute)
 	tokenRow(t, o, user, "openid,email,profile", "access-old", "", &exp)
 	used = false
