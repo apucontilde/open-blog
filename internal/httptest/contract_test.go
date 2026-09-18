@@ -39,10 +39,16 @@ type listJSON struct {
 }
 
 type meJSON struct {
-	UserID   uuid.UUID  `json:"user_id"`
-	TenantID *uuid.UUID `json:"tenant_id"`
-	Role     string     `json:"role"`
-	Platform bool       `json:"platform"`
+	UserID      uuid.UUID  `json:"user_id"`
+	TenantID    *uuid.UUID `json:"tenant_id"`
+	Role        string     `json:"role"`
+	Platform    bool       `json:"platform"`
+	Memberships []struct {
+		TenantID uuid.UUID `json:"tenant_id"`
+		Slug     string    `json:"slug"`
+		Name     string    `json:"name"`
+		Role     string    `json:"role"`
+	} `json:"memberships"`
 }
 
 type tenantJSON struct {
@@ -129,6 +135,58 @@ func TestST1_RenderOnPublishAndPublicRead(t *testing.T) {
 	if pub.Author != "editor" {
 		t.Fatalf("author = %q, want editor", pub.Author)
 	}
+}
+
+// HTML-only preview endpoints: public serves published posts, admin serves any
+// post the actor can read (so drafts can be previewed before publishing).
+func TestPostsHTMLPreview(t *testing.T) {
+	h := newHarness(t)
+	srv := h.httpServer()
+	defer srv.Close()
+
+	tenant := h.createTenant("alpha", "Alpha")
+	editor := h.createUser("editor@example.com", "pw")
+	h.addMembership(tenant, editor, "editor")
+	token := h.issueToken(editor, &tenant)
+
+	p := createPost(t, srv, token, "Hello", "# Heading\n\n**bold** text")
+
+	// Admin preview works on a draft and is HTML, not JSON.
+	admin := do(t, srv, req(t, http.MethodGet, srv.URL+"/admin/posts/"+p.ID.String()+"/html", nil), token)
+	mustStatus(t, admin, http.StatusOK)
+	if ct := admin.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("admin preview content-type = %q, want text/html", ct)
+	}
+	body, _ := io.ReadAll(admin.Body)
+	admin.Body.Close()
+	if !strings.Contains(string(body), "<h1") || strings.Contains(string(body), "**bold**") {
+		t.Fatalf("admin preview body not rendered: %q", body)
+	}
+
+	// Draft is not publicly previewable.
+	draftHTML := do(t, srv, req(t, http.MethodGet, srv.URL+"/public/alpha/posts/"+p.Slug+"/html", nil), "")
+	mustStatus(t, draftHTML, http.StatusNotFound)
+	draftHTML.Body.Close()
+
+	pr := do(t, srv, req(t, http.MethodPost, srv.URL+"/admin/posts/"+p.ID.String()+"/publish", nil), token)
+	mustStatus(t, pr, http.StatusOK)
+	pr.Body.Close()
+
+	pub := do(t, srv, req(t, http.MethodGet, srv.URL+"/public/alpha/posts/"+p.Slug+"/html", nil), "")
+	mustStatus(t, pub, http.StatusOK)
+	if ct := pub.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("public preview content-type = %q, want text/html", ct)
+	}
+	pubBody, _ := io.ReadAll(pub.Body)
+	pub.Body.Close()
+	if !strings.Contains(string(pubBody), "<h1") || !strings.Contains(string(pubBody), "<strong>") {
+		t.Fatalf("public preview body not rendered: %q", pubBody)
+	}
+
+	// Admin preview still requires a session.
+	noAuth := do(t, srv, req(t, http.MethodGet, srv.URL+"/admin/posts/"+p.ID.String()+"/html", nil), "")
+	mustStatus(t, noAuth, http.StatusUnauthorized)
+	noAuth.Body.Close()
 }
 
 // ST-3: a tenant never sees another tenant's posts, publicly or in admin.
@@ -382,6 +440,61 @@ func TestST20_ActiveTenantSwitch(t *testing.T) {
 	denied := do(t, srv, req(t, http.MethodPut, srv.URL+"/auth/me/active-tenant", map[string]any{"tenant_id": outsider}), token)
 	mustStatus(t, denied, http.StatusForbidden)
 	denied.Body.Close()
+}
+
+// ST-18 + seeding flow: a platform super admin creates a tenant, switches into
+// it without a membership, and authors a post under the assumed owner role.
+func TestST18_SuperAdminAuthorsInActiveTenant(t *testing.T) {
+	h := newHarness(t)
+	srv := h.httpServer()
+	defer srv.Close()
+
+	super := h.createUser("root@example.com", "pw")
+	h.setSuperAdmin(super, true)
+	tokSuper := h.issueToken(super, nil)
+
+	created := do(t, srv, req(t, http.MethodPost, srv.URL+"/admin/tenants", map[string]any{"slug": "gamma", "name": "Gamma"}), tokSuper)
+	mustStatus(t, created, http.StatusCreated)
+	var tenant tenantJSON
+	decode(t, created, &tenant)
+
+	sw := do(t, srv, req(t, http.MethodPut, srv.URL+"/auth/me/active-tenant", map[string]any{"tenant_id": tenant.ID}), tokSuper)
+	mustStatus(t, sw, http.StatusOK)
+	sw.Body.Close()
+
+	me := do(t, srv, req(t, http.MethodGet, srv.URL+"/auth/me", nil), tokSuper)
+	mustStatus(t, me, http.StatusOK)
+	var m meJSON
+	decode(t, me, &m)
+	if !m.Platform || m.TenantID == nil || *m.TenantID != tenant.ID || m.Role != "owner" {
+		t.Fatalf("scoped super me = %+v", m)
+	}
+
+	post := createPost(t, srv, tokSuper, "Root post", "body")
+	if post.TenantID != tenant.ID {
+		t.Fatalf("post tenant = %s, want %s", post.TenantID, tenant.ID)
+	}
+}
+
+// /auth/me lists memberships with tenant slug+name for the UI switcher.
+func TestAuthMe_Memberships(t *testing.T) {
+	h := newHarness(t)
+	srv := h.httpServer()
+	defer srv.Close()
+
+	alpha := h.createTenant("alpha", "Alpha Blog")
+	user := h.createUser("member@example.com", "pw")
+	h.addMembership(alpha, user, "editor")
+	token := h.issueToken(user, nil)
+
+	me := do(t, srv, req(t, http.MethodGet, srv.URL+"/auth/me", nil), token)
+	mustStatus(t, me, http.StatusOK)
+	var m meJSON
+	decode(t, me, &m)
+	if len(m.Memberships) != 1 || m.Memberships[0].TenantID != alpha ||
+		m.Memberships[0].Slug != "alpha" || m.Memberships[0].Role != "editor" {
+		t.Fatalf("memberships = %+v", m.Memberships)
+	}
 }
 
 // ST-23: applying an import that already produced a draft is a conflict.

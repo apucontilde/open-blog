@@ -1,0 +1,14 @@
+.git
+.lavish
+docs
+web
+deploy
+bin
+*.test
+*.out
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+README.md

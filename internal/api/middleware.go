@@ -119,6 +119,10 @@ func (s *server) Routes() http.Handler {
 		resp, err := s.pub.Get(r, r.PathValue("tenant"), r.PathValue("slug"))
 		s.pubResp(w, resp, err)
 	})))
+	mux.Handle("GET /public/{tenant}/posts/{slug}/html", s.base(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, err := s.pub.GetHTML(r, r.PathValue("tenant"), r.PathValue("slug"))
+		s.pubResp(w, resp, err)
+	})))
 
 	// auth entry: rate-limited by IP (+ email for signup/login)
 	mux.Handle("POST /auth/signup", s.authRate(s.captureBody(http.HandlerFunc(s.handleSignup))))
@@ -133,6 +137,7 @@ func (s *server) Routes() http.Handler {
 	mux.Handle("GET /admin/posts", s.base(s.auth(s.handlePostsList)))
 	mux.Handle("POST /admin/posts", s.base(s.ipRate(s.auth(s.handlePostsCreate))))
 	mux.Handle("GET /admin/posts/{id}", s.base(s.auth(s.handlePostsGet)))
+	mux.Handle("GET /admin/posts/{id}/html", s.base(s.auth(s.handlePostsHTML)))
 	mux.Handle("PATCH /admin/posts/{id}", s.base(s.ipRate(s.auth(s.handlePostsUpdate))))
 	mux.Handle("DELETE /admin/posts/{id}", s.base(s.ipRate(s.auth(s.handlePostsDelete))))
 	mux.Handle("POST /admin/posts/{id}/publish", s.base(s.ipRate(s.auth(s.handlePostsPublish))))

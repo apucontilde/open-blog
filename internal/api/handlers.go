@@ -200,11 +200,17 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
 	a := actorFrom(r)
 	scope := scopeFrom(r)
+	memberships, err := s.db.MembershipViews(r.Context(), a.UserID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user_id":   a.UserID,
-		"tenant_id": nilOrUUID(scope.TenantID),
-		"role":      roleName(a),
-		"platform":  a.Platform,
+		"user_id":     a.UserID,
+		"tenant_id":   nilOrUUID(scope.TenantID),
+		"role":        roleName(a),
+		"platform":    a.Platform,
+		"memberships": memberships,
 	})
 }
 
@@ -235,10 +241,12 @@ func (s *server) handleSetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, codeValidation, "tenant_id is required")
 		return
 	}
-	userID := actorFrom(r).UserID
-	if _, err := s.db.MembershipRole(r.Context(), userID, req.TenantID); err != nil {
-		writeError(w, http.StatusForbidden, codeForbidden, "not a member of this tenant")
-		return
+	a := actorFrom(r)
+	if !a.Platform {
+		if _, err := s.db.MembershipRole(r.Context(), a.UserID, req.TenantID); err != nil {
+			writeError(w, http.StatusForbidden, codeForbidden, "not a member of this tenant")
+			return
+		}
 	}
 	err := s.db.ScopedRW(r.Context(), store.Scope{}, func(q *store.Queries) error {
 		return q.SetSessionScope(r.Context(), hashToken(tokenFrom(r)), &req.TenantID)
@@ -345,6 +353,25 @@ func (s *server) handlePostsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, postOutFrom(p))
+}
+
+// handlePostsHTML returns only the rendered body so an author can open a draft's
+// preview directly; access follows the same role/ownership rules as Get.
+func (s *server) handlePostsHTML(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusUnprocessableEntity, codeValidation, "invalid post id")
+		return
+	}
+	p, err := s.posts.Get(r.Context(), actorFrom(r), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(p.ContentHTML))
 }
 
 func (s *server) handlePostsUpdate(w http.ResponseWriter, r *http.Request) {

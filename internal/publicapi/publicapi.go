@@ -88,6 +88,18 @@ func errorResponse(status int, msg string) *Response {
 	return &Response{Status: status, Header: h, Body: b}
 }
 
+// htmlResponse serves a rendered post body as HTML so it can be opened directly
+// in a browser; the body is the server-sanitized content_html artifact.
+func htmlResponse(body []byte, etag string) *Response {
+	h := make(http.Header)
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", CacheControl)
+	if etag != "" {
+		h.Set("ETag", `"`+etag+`"`)
+	}
+	return &Response{Status: http.StatusOK, Header: h, Body: body}
+}
+
 func notModified(etag string) *Response {
 	h := make(http.Header)
 	h.Set("Cache-Control", CacheControl)

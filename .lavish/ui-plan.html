@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="luxury">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Open Blog — Simple Editor UI &amp; Dev Stack: Implementation Plan</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+  :where([style*="display: grid"], [style*="display:grid"], [style*="display: flex"], [style*="display:flex"]) > * {
+    min-width: 0;
+  }
+  :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .badge, .label) {
+    overflow-wrap: anywhere;
+  }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  html { scroll-behavior: smooth; }
+  .section-link { scroll-margin-top: 5rem; }
+  .mermaid { display: flex; justify-content: center; margin: 1rem 0; }
+  .mermaid svg { max-width: 100%; height: auto; }
+  .code-host { border-radius: .75rem; border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent); overflow: hidden; background: var(--color-base-200); }
+  .mock-html h1 { font-size: 1.6rem; font-weight: 700; }
+  .mock-html h2 { font-size: 1.25rem; font-weight: 700; }
+  .mock-html p { margin: .5rem 0; }
+  .mock-html code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; background: var(--color-base-300); padding: 0 .25rem; border-radius: .25rem; }
+  .mock-html ul { list-style: disc; padding-left: 1.25rem; }
+  .mock-html blockquote { border-left: 3px solid var(--color-primary); padding-left: .75rem; opacity: .85; }
+</style>
+</head>
+<body class="bg-base-100 text-base-content">
+
+<header class="sticky top-0 z-50 backdrop-blur bg-base-100/80 border-b border-base-content/10">
+  <div class="navbar mx-auto max-w-6xl px-4">
+    <div class="navbar-start">
+      <a class="btn btn-ghost text-lg font-semibold">Open Blog · UI plan</a>
+    </div>
+    <div class="navbar-end flex gap-2">
+      <span class="badge badge-soft badge-info hidden sm:inline-flex">No build step</span>
+      <span class="badge badge-soft badge-success hidden sm:inline-flex">docker compose up</span>
+      <a href="#decisions" class="btn btn-sm btn-outline btn-success">4 decisions confirmed</a>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-6xl px-4 pb-24">
+
+  <!-- ============ HERO ============ -->
+  <section class="pt-10 pb-6">
+    <p class="badge badge-soft badge-neutral mb-3">Implementation plan · pre-code · v0</p>
+    <h1 class="text-4xl lg:text-5xl font-bold leading-tight">A seeded, same-origin editor UI and a one-command dev stack</h1>
+    <p class="mt-4 text-lg text-base-content/70 max-w-3xl">
+      The API already serves authentication, tenancy, and posts. This plan adds the smallest UI that can exercise it —
+      <strong>sign in, create a tenant, create/edit/view a post</strong> — plus a <strong>docker-compose</strong> that
+      boots Postgres, the API, a one-shot <strong>seed</strong>, and an nginx-served UI. The browser only ever talks to one
+      origin, so the existing HttpOnly session cookie just works.
+    </p>
+    <div class="flex flex-wrap gap-3 mt-6">
+      <div class="badge badge-lg badge-primary">Password login</div>
+      <div class="badge badge-lg badge-secondary">Seeded first user</div>
+      <div class="badge badge-lg badge-accent">Create tenant</div>
+      <div class="badge badge-lg badge-info">Post create · edit · view</div>
+      <div class="badge badge-lg badge-soft badge-primary">api + ui + db</div>
+      <div class="badge badge-lg badge-soft badge-warning">4 small API changes</div>
+    </div>
+    <div class="alert alert-success mt-4 sm:alert-horizontal">
+      <span class="text-lg">✓</span>
+      <div class="text-sm">
+        <strong>Implemented &amp; verified.</strong> The authz fix, membership read model, seed, static UI, and compose stack are
+        built. Login → switch tenant → create → publish → public view was exercised against the running stack, and tenant
+        isolation holds with the non-superuser <code>blog_app</code> role.
+      </div>
+    </div>
+    <div class="alert alert-warning mt-6 sm:alert-horizontal">
+      <span class="text-xl">⚠</span>
+      <div class="min-w-0">
+        <div class="font-semibold">The seeded super admin currently cannot author a post</div>
+        <p class="text-sm text-base-content/80">Verified in <code>internal/authz/actor.go:38</code>: any <code>super_admin</code> resolves
+        <code>Platform&nbsp;=&nbsp;true</code> with <code>Tenant&nbsp;=&nbsp;nil</code>, and <code>posts.Create</code> then fails
+        <code>ErrNoTenant</code> (<code>internal/posts/service.go:71</code>). So <code>POST /admin/tenants</code> (platform-only) and
+        "create a post" (tenant role) cannot be done by the same seeded user today. Section 4 fixes this.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ADOPTED DEFAULTS ============ -->
+  <section id="defaults" class="section-link mt-4">
+    <div class="card card-border bg-base-200">
+      <div class="card-body">
+        <h2 class="card-title text-base">Assumptions adopted for this review</h2>
+        <ul class="text-sm mt-1 grid sm:grid-cols-2 gap-x-6 gap-y-1 list-disc pl-5 text-base-content/80">
+          <li>UI = one vanilla HTML/CSS/JS page; Tailwind + DaisyUI via CDN, no bundler</li>
+          <li>Auth = existing HttpOnly session cookie (same origin), no token storage in JS</li>
+          <li>One origin in dev: nginx in the <code>ui</code> container reverse-proxies <code>/auth /admin /public</code></li>
+          <li>Seed is an idempotent one-shot process (<code>cmd/seed</code>), not auto-signup</li>
+          <li>Seeded super admin can assume owner in any active tenant (ST-18)</li>
+          <li>Out of scope: images/R2, document import, Google/GitHub SSO, member admin, signup, password change</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ NAV ============ -->
+  <nav class="mt-8 hidden lg:block">
+    <ul class="menu menu-horizontal menu-sm bg-base-200 rounded-box px-2 flex-wrap">
+      <li><a href="#goal">1 · Goal</a></li>
+      <li><a href="#state">2 · Current → target</a></li>
+      <li><a href="#arch">3 · Architecture</a></li>
+      <li><a href="#apichanges">4 · API changes</a></li>
+      <li><a href="#seed">5 · Seeding</a></li>
+      <li><a href="#screens">6 · Screens</a></li>
+      <li><a href="#contract">7 · UI ⇄ API</a></li>
+      <li><a href="#stack">8 · Docker stack</a></li>
+      <li><a href="#tasks">9 · Tasks</a></li>
+      <li><a href="#decisions">10 · Decisions</a></li>
+      <li><a href="#risks">11 · Risks</a></li>
+      <li><a href="#verify">12 · Verify</a></li>
+    </ul>
+  </nav>
+
+  <!-- ============ 1 GOAL ============ -->
+  <section id="goal" class="section-link mt-10">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">1</span>
+      <h2 class="text-2xl font-bold">Goal &amp; scope</h2>
+    </div>
+    <div class="grid md:grid-cols-3 gap-4 mt-4">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">In scope</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Password sign-in / sign-out against the seeded account</li>
+            <li>Tenant switcher + create-tenant form (platform users)</li>
+            <li>Post list, create, edit, delete, publish / unpublish</li>
+            <li>View a post rendered from server HTML (editor + public)</li>
+            <li>docker-compose: db, api, seed, ui with healthchecks</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Deliberately minimal</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>No markdown library — preview is the server's <code>content_html</code></li>
+            <li>No client-side router library; hash routes only</li>
+            <li>No state store; a single <code>state</code> object + <code>render()</code></li>
+            <li>Admin list returns all posts (no pagination UI)</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card card-border border-warning/40 bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Out of scope</h3>
+          <ul class="text-sm text-base-content/70 list-disc pl-5 space-y-1">
+            <li>Images (R2 presign), document import, SSO</li>
+            <li>Member invite / role management screens</li>
+            <li>Self-signup, password reset / change</li>
+            <li>Reader sites (one per tenant)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 2 CURRENT -> TARGET ============ -->
+  <section id="state" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">2</span>
+      <h2 class="text-2xl font-bold">Current state → target state</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">Verified against the working tree. The API is complete for this UI's needs except for one
+    authorization precedence bug and one missing read model; the UI, seed, and containers do not exist yet.</p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm table-zebra">
+        <thead><tr><th>Area</th><th>Today</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="font-semibold">UI</td>
+            <td class="text-base-content/70">None. <span class="badge badge-soft badge-error badge-xs">missing</span></td>
+            <td class="text-base-content/70"><code>web/</code> static page served by the <code>ui</code> container</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Seeded users</td>
+            <td class="text-base-content/70">None; <code>POST /auth/signup</code> never sets <code>super_admin</code></td>
+            <td class="text-base-content/70">Idempotent <code>cmd/seed</code> creates first super admin + tenant + owner membership</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Super admin authoring</td>
+            <td class="text-base-content/70">Broken: <code>Platform</code> actor has <code>Tenant=nil</code> → <code>ErrNoTenant</code></td>
+            <td class="text-base-content/70">Active tenant gives the super admin owner scope (ST-18)</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Tenant discovery</td>
+            <td class="text-base-content/70"><code>GET /auth/me</code> has no membership list; only super admins can list tenants</td>
+            <td class="text-base-content/70"><code>/auth/me</code> returns <code>memberships</code> with slug + name</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Containers</td>
+            <td class="text-base-content/70">No Dockerfile, no compose, no reverse proxy</td>
+            <td class="text-base-content/70">Compose with healthchecked <code>db</code> / <code>api</code> / one-shot <code>seed</code> / <code>ui</code></td>
+          </tr>
+          <tr>
+            <td class="font-semibold">CORS</td>
+            <td class="text-base-content/70">Implemented but unused (no browser client)</td>
+            <td class="text-base-content/70">Still unused: single-origin via nginx; <code>EDITOR_ORIGINS</code> stays empty</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 3 ARCHITECTURE ============ -->
+  <section id="arch" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">3</span>
+      <h2 class="text-2xl font-bold">System shape</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      One public origin (<code>http://localhost:8080</code>) is the <code>ui</code> container. nginx serves the static page and
+      forwards API paths to <code>api:8080</code> on the compose network. Because the browser and API share an origin, the
+      session cookie (<code>HttpOnly</code>, <code>SameSite=Lax</code>) is sent automatically and no CORS or token storage is needed.
+    </p>
+    <pre class="mermaid">
+flowchart LR
+    B["Browser\nhttp://localhost:8080"] -->|"GET /index.html · app.js"| UI["ui · nginx:alpine\nstatic + reverse proxy"]
+    UI -->|"/auth/* · /admin/* · /public/*"| API["api · Go net/http\n:8080 (internal)"]
+    API -->|"pgx · RLS per request"| DB[("db · postgres:16\nvolume pgdata")]
+    API -->|"goose.Up on startup"| DB
+    SEED["seed · one-shot cmd/seed\nuser + tenant + owner"] -->|"idempotent upserts"| DB
+    API -.->|"readiness gate"| UI
+    </pre>
+    <div class="grid md:grid-cols-3 gap-4 mt-2">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Why same-origin nginx</h3>
+          <p class="text-sm text-base-content/70">The API already issues an HttpOnly cookie. Reverse-proxying avoids CORS credentials,
+          cookie-domain juggling, and CSRF-on-cross-site concerns entirely, while keeping <code>ui</code> a separate, replaceable service.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Why a seed process</h3>
+          <p class="text-sm text-base-content/70">Bootstrapping a platform admin needs DB writes that no public endpoint should expose.
+          A dedicated <code>cmd/seed</code> reuses the same argon2 parameters and is safe to re-run on every <code>compose up</code>.</p>
+        </div>
+      </div>
+      <div class="card card-border border-primary/50 bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Why the authz fix is required</h3>
+          <p class="text-sm text-base-content/70">Without it, the one seeded user can either create tenants <em>or</em> create posts, never both.
+          The fix is small and moves the code toward the already-written ST-18 ("super admin switches active scope and acts").</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4 API CHANGES ============ -->
+  <section id="apichanges" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">4</span>
+      <h2 class="text-2xl font-bold">Required API changes</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      Four focused backend edits (plus two new files). None changes an existing request body or success response shape; the
+      only behavioral change is that a super admin with an explicit active tenant now acts as that tenant's owner instead of
+      resolving to an unusable platform-only actor.
+    </p>
+
+    <h3 class="text-lg font-semibold mt-6">4.1 <code class="font-mono text-sm">internal/authz/actor.go</code> — tenant scope wins over platform fallback</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl">Today the super-admin branch returns before the membership branch, discarding the active tenant. The new order: resolve the super bit, then branch on whether an active tenant exists.</p>
+    <div id="diff-actor" class="code-host mt-3"></div>
+
+    <h3 class="text-lg font-semibold mt-8">4.2 <code class="font-mono text-sm">internal/authz/scope.go</code> — bypass RLS only when unscoped</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl">A scoped super admin must stay inside tenant RLS; only a platform-only actor (no active tenant) gets cross-tenant reads. Tenant management handlers keep checking <code>actor.Platform</code>, not the scope.</p>
+    <div id="diff-scope" class="code-host mt-3"></div>
+
+    <h3 class="text-lg font-semibold mt-8">4.3 <code class="font-mono text-sm">internal/api/handlers.go</code> — <code>/auth/me</code> memberships &amp; platform tenant switch</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl">The UI cannot guess tenant ids. <code>/auth/me</code> gains a <code>memberships</code> array (tenant id, slug, name, role); and <code>PUT /auth/me/active-tenant</code> skips the membership check for platform actors.</p>
+    <div id="diff-me" class="code-host mt-3"></div>
+    <div id="diff-tenant" class="code-host mt-3"></div>
+
+    <h3 class="text-lg font-semibold mt-8">4.4 <code class="font-mono text-sm">internal/store/store.go</code> — membership read model</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl">Mirrors the existing <code>Memberships</code> helper but joins <code>tenants</code> for the slug the public-view link needs.</p>
+    <div id="file-membership" class="code-host mt-3"></div>
+
+    <h3 class="text-lg font-semibold mt-8">4.5 <code class="font-mono text-sm">internal/auth/password.go</code> — export the hasher</h3>
+    <p class="text-sm text-base-content/70 max-w-3xl">The seed process must produce an argon2id hash identical in shape to runtime signup.</p>
+    <div id="file-hash" class="code-host mt-3"></div>
+  </section>
+
+  <!-- ============ 5 SEED ============ -->
+  <section id="seed" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">5</span>
+      <h2 class="text-2xl font-bold">Seeding the first users</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">
+      A new <code>cmd/seed</code> builds once into the API image and runs as a one-shot compose service after the API is
+      healthy (which guarantees migrations ran). It is idempotent: re-running re-hashes the password, keeps the existing
+      user row, and upserts tenant + membership.
+    </p>
+    <div class="grid lg:grid-cols-2 gap-4 mt-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="badge badge-soft badge-neutral font-mono text-xs">cmd/seed/main.go</span>
+          <span class="text-sm font-semibold">entrypoint</span>
+        </div>
+        <div id="file-seed" class="code-host mt-2"></div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="badge badge-soft badge-neutral font-mono text-xs">internal/store/seed_queries.go</span>
+          <span class="text-sm font-semibold">idempotent SQL</span>
+        </div>
+        <div id="file-seedq" class="code-host mt-2"></div>
+      </div>
+    </div>
+    <div class="alert alert-info mt-4">
+      <span class="text-lg">i</span>
+      <div class="text-sm">
+        <strong>Ordering guarantee.</strong> <code>seed</code> uses <code>depends_on: api: service_healthy</code>. The API's
+        <code>run()</code> calls <code>goose.Up</code> before it starts serving (<code>cmd/api/main.go:44</code>), so by the time
+        <code>/livez</code> passes, the schema is current. No separate migrate service is needed.
+      </div>
+    </div>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm">
+        <thead><tr><th>Env</th><th>Default</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td class="font-mono text-xs">SEED_EMAIL</td><td class="text-base-content/60">required</td><td class="text-sm text-base-content/70">Lower-cased before matching</td></tr>
+          <tr><td class="font-mono text-xs">SEED_PASSWORD</td><td class="text-base-content/60">required</td><td class="text-sm text-base-content/70">argon2id-hashed on each run</td></tr>
+          <tr><td class="font-mono text-xs">SEED_SUPER_ADMIN</td><td class="text-base-content/60">true</td><td class="text-sm text-base-content/70">Sets <code>users.super_admin</code> (platform capabilities)</td></tr>
+          <tr><td class="font-mono text-xs">SEED_TENANT_SLUG</td><td class="text-base-content/60">demo</td><td class="text-sm text-base-content/70">Created if absent; also the public URL slug</td></tr>
+          <tr><td class="font-mono text-xs">SEED_TENANT_NAME</td><td class="text-base-content/60">Demo Blog</td><td class="text-sm text-base-content/70">Display name</td></tr>
+          <tr><td class="font-mono text-xs">SEED_ROLE</td><td class="text-base-content/60">owner</td><td class="text-sm text-base-content/70">Membership role for the seed tenant</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 6 SCREENS ============ -->
+  <section id="screens" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">6</span>
+      <h2 class="text-2xl font-bold">Proposed screens</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">Four views plus a create-tenant dialog, all in one page driven by a tiny <code>render()</code>.
+    The mockups below are rendered in the same Tailwind + DaisyUI system the UI will use, so they represent the real result.</p>
+
+    <div class="grid lg:grid-cols-2 gap-6 mt-5">
+      <!-- login -->
+      <div>
+        <h3 class="text-base font-semibold mb-2">6.1 Sign in <span class="badge badge-soft badge-neutral badge-sm">hash #/login</span></h3>
+        <div class="mockup-browser bg-base-300 border border-base-content/10 w-full">
+          <div class="mockup-browser-toolbar"><div class="input text-sm">localhost:8080/#/login</div></div>
+          <div class="bg-base-100 p-6 flex justify-center">
+            <div class="card card-border bg-base-200 w-full max-w-sm">
+              <div class="card-body">
+                <h3 class="card-title">Sign in</h3>
+                <label class="label text-xs">Email</label>
+                <input class="input input-bordered input-sm" value="admin@example.com" readonly>
+                <label class="label text-xs">Password</label>
+                <input class="input input-bordered input-sm" type="password" value="password" readonly>
+                <button class="btn btn-primary btn-sm mt-2">Sign in</button>
+                <div role="alert" class="alert alert-error alert-soft py-1 text-xs"><span>invalid credentials</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-2">On success the app immediately issues <code>GET /auth/me</code>; a <code>401</code> returns here and clears state.</p>
+      </div>
+
+      <!-- shell + post list -->
+      <div>
+        <h3 class="text-base font-semibold mb-2">6.2 Post list <span class="badge badge-soft badge-neutral badge-sm">hash #/posts</span></h3>
+        <div class="mockup-browser bg-base-300 border border-base-content/10 w-full">
+          <div class="mockup-browser-toolbar"><div class="input text-sm">localhost:8080/#/posts</div></div>
+          <div class="bg-base-100">
+            <div class="navbar bg-base-200 min-h-10 px-3">
+              <div class="navbar-start gap-2">
+                <span class="font-semibold text-sm">Open Blog</span>
+                <select class="select select-xs select-bordered"><option>demo</option><option>acme</option></select>
+                <span class="badge badge-xs badge-soft badge-success">owner</span>
+              </div>
+              <div class="navbar-end gap-1">
+                <button class="btn btn-xs btn-ghost">New tenant</button>
+                <button class="btn btn-xs btn-primary">New post</button>
+              </div>
+            </div>
+            <div class="p-3">
+              <div class="overflow-x-auto rounded-box border border-base-content/10">
+                <table class="table table-xs">
+                  <thead><tr><th>Title</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+                  <tbody>
+                    <tr><td>Hello world</td><td><span class="badge badge-xs badge-success badge-soft">published</span></td><td class="text-base-content/60">2m</td><td class="text-primary">edit · view</td></tr>
+                    <tr><td>Draft idea</td><td><span class="badge badge-xs badge-warning badge-soft">draft</span></td><td class="text-base-content/60">1h</td><td class="text-primary">edit · publish</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-2">Signed-in users only. The tenant select submits <code>PUT /auth/me/active-tenant</code> and re-renders.</p>
+      </div>
+
+      <!-- editor -->
+      <div class="lg:col-span-2">
+        <h3 class="text-base font-semibold mb-2">6.3 Editor <span class="badge badge-soft badge-neutral badge-sm">hash #/posts/:id</span></h3>
+        <div class="mockup-browser bg-base-300 border border-base-content/10 w-full">
+          <div class="mockup-browser-toolbar"><div class="input text-sm">localhost:8080/#/posts/0192…</div></div>
+          <div class="bg-base-100 p-3">
+            <div class="grid sm:grid-cols-3 gap-2 mb-3">
+              <input class="input input-sm input-bordered sm:col-span-2" value="Hello world" readonly>
+              <input class="input input-sm input-bordered font-mono" value="hello-world" readonly>
+            </div>
+            <div class="grid md:grid-cols-2 gap-3">
+              <div>
+                <div class="label text-xs py-1">content_markdown</div>
+                <textarea class="textarea textarea-bordered w-full h-52 font-mono text-xs" readonly># Hello world
+
+This is a **draft** post.
+
+- one
+- two
+
+> quote</textarea>
+              </div>
+              <div>
+                <div class="label text-xs py-1">preview · server `content_html`</div>
+                <div class="mock-html border border-base-content/10 rounded-box p-3 h-52 overflow-auto bg-base-200">
+                  <h1>Hello world</h1>
+                  <p>This is a <strong>draft</strong> post.</p>
+                  <ul><li>one</li><li>two</li></ul>
+                  <blockquote>quote</blockquote>
+                </div>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2 mt-3">
+              <button class="btn btn-sm btn-primary">Save</button>
+              <button class="btn btn-sm btn-success">Publish</button>
+              <button class="btn btn-sm btn-ghost">View public</button>
+              <span class="badge badge-soft badge-neutral badge-sm self-center">unsaved changes</span>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-2">No client markdown renderer: the preview is the exact <code>content_html</code> the API returns from
+        <code>POST/PATCH /admin/posts</code>, so preview and published output cannot drift. "View public" opens the public reader view (published posts only).</p>
+      </div>
+
+      <!-- public view + create tenant -->
+      <div>
+        <h3 class="text-base font-semibold mb-2">6.4 Public view <span class="badge badge-soft badge-neutral badge-sm">hash #/view/:slug</span></h3>
+        <div class="mockup-browser bg-base-300 border border-base-content/10 w-full">
+          <div class="mockup-browser-toolbar"><div class="input text-sm">localhost:8080/#/view/hello-world</div></div>
+          <div class="bg-base-100 p-5">
+            <div class="mock-html max-w-prose mx-auto">
+              <h1>Hello world</h1>
+              <p class="text-xs text-base-content/50">by admin · Sep 16, 2026</p>
+              <p>This is a <strong>draft</strong> post.</p>
+              <ul><li>one</li><li>two</li></ul>
+              <blockquote>quote</blockquote>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-2">Content from <code>GET /public/{tenant}/posts/{slug}</code>. Drafts return <code>404</code>, shown as "not published yet".</p>
+      </div>
+
+      <div>
+        <h3 class="text-base font-semibold mb-2">6.5 Create tenant <span class="badge badge-soft badge-neutral badge-sm">dialog · platform only</span></h3>
+        <div class="mockup-browser bg-base-300 border border-base-content/10 w-full">
+          <div class="mockup-browser-toolbar"><div class="input text-sm">localhost:8080/#/posts</div></div>
+          <div class="bg-base-100 p-6 flex justify-center relative">
+            <div class="card card-border bg-base-200 w-full max-w-sm shadow-xl">
+              <div class="card-body">
+                <h3 class="card-title text-base">New tenant</h3>
+                <label class="label text-xs">Slug</label>
+                <input class="input input-sm input-bordered font-mono" value="acme" readonly>
+                <label class="label text-xs">Name</label>
+                <input class="input input-sm input-bordered" value="Acme Blog" readonly>
+                <div class="card-actions justify-end mt-2">
+                  <button class="btn btn-xs btn-ghost">Cancel</button>
+                  <button class="btn btn-xs btn-primary">Create</button>
+                </div>
+                <div role="alert" class="alert alert-error alert-soft py-1 text-xs"><span>slug already in use</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-2">On success the app refreshes tenants, calls <code>PUT /auth/me/active-tenant</code>, and lands on the empty post list.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 7 CONTRACT ============ -->
+  <section id="contract" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">7</span>
+      <h2 class="text-2xl font-bold">UI ⇄ API contract</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">Every button maps to one existing endpoint. Errors always use the envelope
+    <code>{"error":{"code","message"}}</code> (<code>internal/api/errors.go:29</code>); the UI shows <code>message</code> in a toast.</p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm table-zebra">
+        <thead><tr><th>UI action</th><th>Endpoint</th><th>Body</th><th>Success</th><th>Failure handling</th></tr></thead>
+        <tbody>
+          <tr><td>Bootstrap</td><td class="font-mono text-xs">GET /auth/me</td><td class="text-base-content/60">—</td><td class="text-xs">200 me + memberships</td><td class="text-xs">401 → login</td></tr>
+          <tr><td>Sign in</td><td class="font-mono text-xs">POST /auth/login</td><td class="font-mono text-xs">{email,password}</td><td class="text-xs">200, Set-Cookie</td><td class="text-xs">401 creds · 429 rate</td></tr>
+          <tr><td>Sign out</td><td class="font-mono text-xs">POST /auth/logout</td><td class="text-base-content/60">—</td><td class="text-xs">200</td><td class="text-xs">ignore, clear state</td></tr>
+          <tr><td>List tenants</td><td class="font-mono text-xs">GET /admin/tenants</td><td class="text-base-content/60">—</td><td class="text-xs">200 {tenants}</td><td class="text-xs">403 non-platform → use memberships</td></tr>
+          <tr><td>Create tenant</td><td class="font-mono text-xs">POST /admin/tenants</td><td class="font-mono text-xs">{slug,name}</td><td class="text-xs">201 {id,slug}</td><td class="text-xs">409 slug · 422 invalid</td></tr>
+          <tr><td>Switch tenant</td><td class="font-mono text-xs">PUT /auth/me/active-tenant</td><td class="font-mono text-xs">{tenant_id}</td><td class="text-xs">200</td><td class="text-xs">403 not a member</td></tr>
+          <tr><td>List posts</td><td class="font-mono text-xs">GET /admin/posts[?status=]</td><td class="text-base-content/60">—</td><td class="text-xs">200 {posts}</td><td class="text-xs">403 no tenant</td></tr>
+          <tr><td>Create post</td><td class="font-mono text-xs">POST /admin/posts</td><td class="font-mono text-xs">{title,content_markdown,excerpt?,slug?}</td><td class="text-xs">201 post</td><td class="text-xs">422 title · 403</td></tr>
+          <tr><td>Open editor</td><td class="font-mono text-xs">GET /admin/posts/{id}</td><td class="text-base-content/60">—</td><td class="text-xs">200 post + content_html</td><td class="text-xs">404 · 403</td></tr>
+          <tr><td>Save</td><td class="font-mono text-xs">PATCH /admin/posts/{id}</td><td class="font-mono text-xs">{title?,content_markdown?,slug?,excerpt?}</td><td class="text-xs">200 post</td><td class="text-xs">409 slug · 403</td></tr>
+          <tr><td>Publish</td><td class="font-mono text-xs">POST /admin/posts/{id}/publish</td><td class="text-base-content/60">—</td><td class="text-xs">200 post</td><td class="text-xs">422 empty body · 403</td></tr>
+          <tr><td>Unpublish</td><td class="font-mono text-xs">POST /admin/posts/{id}/unpublish</td><td class="text-base-content/60">—</td><td class="text-xs">200 post</td><td class="text-xs">403</td></tr>
+          <tr><td>Delete</td><td class="font-mono text-xs">DELETE /admin/posts/{id}</td><td class="text-base-content/60">—</td><td class="text-xs">204</td><td class="text-xs">confirm dialog first</td></tr>
+          <tr><td>View public</td><td class="font-mono text-xs">GET /public/{tenant}/posts/{slug}</td><td class="text-base-content/60">—</td><td class="text-xs">200 {title,content_html,author}</td><td class="text-xs">404 draft/unknown</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-base-content/50 mt-2">All requests use <code>fetch(path, {credentials: "same-origin"})</code> — the cookie is HttpOnly and never read by JS.</p>
+  </section>
+
+  <!-- ============ 8 DOCKER STACK ============ -->
+  <section id="stack" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">8</span>
+      <h2 class="text-2xl font-bold">Docker dev stack</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">Four services on one bridge network. Only <code>ui</code> (and optionally <code>db</code> for inspection) publishes a port.
+    <code>SESSION_KEY</code> is required by <code>cmd/api/config.go:70</code>; generate it once into <code>.env</code>.</p>
+
+    <h3 class="text-lg font-semibold mt-5"><code class="font-mono text-sm">docker-compose.yml</code></h3>
+    <div id="file-compose" class="code-host mt-2"></div>
+    <div class="alert alert-warning mt-4 sm:alert-horizontal">
+      <span class="text-xl">⚠</span>
+      <div class="min-w-0 text-sm">
+        <strong>The API must not connect as a Postgres superuser.</strong> Superusers bypass row-level security regardless of
+        <code>FORCE</code>, which silently breaks tenant isolation. <code>deploy/initdb/01-app-role.sql</code> creates the
+        non-superuser <code>blog_app</code> owner role the API connects as. Verified end-to-end: with a superuser URL the
+        admin list returned every tenant's posts; with <code>blog_app</code> it returns only the active tenant's.
+      </div>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6 mt-8">
+      <div>
+        <h3 class="text-lg font-semibold"><code class="font-mono text-sm">Dockerfile</code> <span class="text-sm font-normal text-base-content/50">(API image, 3 binaries)</span></h3>
+        <div id="file-dockerfile" class="code-host mt-2"></div>
+      </div>
+      <div>
+        <h3 class="text-lg font-semibold"><code class="font-mono text-sm">deploy/nginx.conf</code></h3>
+        <div id="file-nginx" class="code-host mt-2"></div>
+      </div>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6 mt-6">
+      <div>
+        <h3 class="text-lg font-semibold"><code class="font-mono text-sm">.env.example</code></h3>
+        <div id="file-env" class="code-host mt-2"></div>
+      </div>
+      <div>
+        <h3 class="text-lg font-semibold"><code class="font-mono text-sm">.dockerignore</code></h3>
+        <div id="file-dockerignore" class="code-host mt-2"></div>
+      </div>
+    </div>
+
+    <div class="alert alert-info mt-6">
+      <span class="text-lg">i</span>
+      <div class="text-sm">
+        <strong>Base image note.</strong> <code>go.mod</code> declares <code>go 1.26.0</code>. If the build image tag does not
+        exist on the registry, pin <code>golang:1.26-alpine</code> to the newest available <code>1.26.x</code> (or bump go.mod);
+        the toolchain only needs to satisfy the directive.
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 9 TASKS ============ -->
+  <section id="tasks" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">9</span>
+      <h2 class="text-2xl font-bold">Implementation breakdown</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">Ordered so the stack comes up before the UI is exercised. Every row names the exact file to create or edit.</p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm">
+        <thead><tr><th class="w-12">#</th><th>Task</th><th>Files</th><th>Verification</th></tr></thead>
+        <tbody>
+          <tr><td class="text-base-content/50">1</td><td class="font-semibold">Fix actor scope precedence</td><td class="font-mono text-xs">internal/authz/actor.go<br>internal/authz/scope.go</td><td class="text-xs text-base-content/70"><code>go test ./internal/authz/...</code>; update <code>resolve_actor_test.go</code></td></tr>
+          <tr><td class="text-base-content/50">2</td><td class="font-semibold">Expose membership read model</td><td class="font-mono text-xs">internal/store/store.go<br>internal/api/handlers.go</td><td class="text-xs text-base-content/70"><code>/auth/me</code> returns memberships; contract test</td></tr>
+          <tr><td class="text-base-content/50">3</td><td class="font-semibold">Platform tenant switch</td><td class="font-mono text-xs">internal/api/handlers.go</td><td class="text-xs text-base-content/70">super admin can <code>PUT active-tenant</code> for a non-member tenant</td></tr>
+          <tr><td class="text-base-content/50">4</td><td class="font-semibold">Seed command</td><td class="font-mono text-xs">internal/auth/password.go<br>internal/store/seed_queries.go<br>cmd/seed/main.go</td><td class="text-xs text-base-content/70">run twice; exactly one user, one tenant, one membership</td></tr>
+          <tr><td class="text-base-content/50">5</td><td class="font-semibold">Containerize API</td><td class="font-mono text-xs">Dockerfile<br>.dockerignore</td><td class="text-xs text-base-content/70"><code>docker build -t openblog-api .</code></td></tr>
+          <tr><td class="text-base-content/50">6</td><td class="font-semibold">Compose db + api + seed</td><td class="font-mono text-xs">docker-compose.yml<br>deploy/initdb/01-app-role.sql<br>.env.example</td><td class="text-xs text-base-content/70"><code>docker compose up db api seed</code>; <code>/readyz</code> 200; RLS isolation holds</td></tr>
+          <tr><td class="text-base-content/50">7</td><td class="font-semibold">UI shell: login + bootstrap</td><td class="font-mono text-xs">web/index.html<br>web/app.js<br>web/styles.css</td><td class="text-xs text-base-content/70">sign in as seed user; <code>/auth/me</code> populates state</td></tr>
+          <tr><td class="text-base-content/50">8</td><td class="font-semibold">Tenant switcher + create</td><td class="font-mono text-xs">web/app.js</td><td class="text-xs text-base-content/70">create tenant → auto-switch → empty list</td></tr>
+          <tr><td class="text-base-content/50">9</td><td class="font-semibold">Post list + editor + view</td><td class="font-mono text-xs">web/app.js</td><td class="text-xs text-base-content/70">create → edit → publish → public view</td></tr>
+          <tr><td class="text-base-content/50">10</td><td class="font-semibold">nginx ui service</td><td class="font-mono text-xs">deploy/nginx.conf<br>docker-compose.yml</td><td class="text-xs text-base-content/70"><code>docker compose up --build</code>; full flow on :8080</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 10 DECISIONS ============ -->
+  <section id="decisions" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">10</span>
+      <h2 class="text-2xl font-bold">Decisions — confirmed</h2>
+    </div>
+    <p class="mt-2 text-base-content/70 max-w-3xl">All four defaults were confirmed in review and are now baseline; annotate any card to reopen one.</p>
+    <div class="alert alert-success mt-4 sm:alert-horizontal">
+      <span class="text-lg">✓</span>
+      <div class="text-sm">
+        <strong>Confirmed:</strong> D1 vanilla + Tailwind CDN · D2 HttpOnly cookie · D3 nginx single origin · D4 super admin assumes owner in the active tenant.
+      </div>
+    </div>
+
+    <!-- D1 -->
+    <div class="card card-border bg-base-200 mt-5" data-lavish-question="ui-stack">
+      <div class="card-body">
+        <div class="flex items-center gap-2">
+          <span class="badge badge-primary">D1</span>
+          <h3 class="card-title text-base">How the UI is built &amp; styled</h3>
+        </div>
+        <div class="flex items-center gap-2 mt-1">
+          <span class="badge badge-success badge-soft">Confirmed</span>
+          <span class="text-sm"><strong>Vanilla HTML/CSS/JS + Tailwind/DaisyUI CDN</strong> — zero build; ships as 3 static files. Add a bundler later if it grows.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- D2 -->
+    <div class="card card-border bg-base-200 mt-4" data-lavish-question="auth">
+      <div class="card-body">
+        <div class="flex items-center gap-2">
+          <span class="badge badge-primary">D2</span>
+          <h3 class="card-title text-base">Session transport in the browser</h3>
+        </div>
+        <div class="flex items-center gap-2 mt-1">
+          <span class="badge badge-success badge-soft">Confirmed</span>
+          <span class="text-sm"><strong>HttpOnly cookie</strong> via same-origin <code>fetch</code> — uses the login <code>Set-Cookie</code>; the token is never exposed to JS.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- D3 -->
+    <div class="card card-border bg-base-200 mt-4" data-lavish-question="origin">
+      <div class="card-body">
+        <div class="flex items-center gap-2">
+          <span class="badge badge-primary">D3</span>
+          <h3 class="card-title text-base">How browser reaches the API</h3>
+        </div>
+        <div class="flex items-center gap-2 mt-1">
+          <span class="badge badge-success badge-soft">Confirmed</span>
+          <span class="text-sm"><strong>nginx single-origin reverse proxy</strong> — <code>ui</code> at :8080 proxies <code>/auth /admin /public</code> to <code>api:8080</code>; no CORS and no CSRF surface.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- D4 -->
+    <div class="card card-border bg-base-200 mt-4" data-lavish-question="supertenant">
+      <div class="card-body">
+        <div class="flex items-center gap-2">
+          <span class="badge badge-primary">D4</span>
+          <h3 class="card-title text-base">How the platform super admin gets authoring rights</h3>
+        </div>
+        <div class="flex items-center gap-2 mt-1">
+          <span class="badge badge-success badge-soft">Confirmed</span>
+          <span class="text-sm"><strong>Super admin assumes owner in the active tenant</strong> (ST-18) — one seeded user creates a tenant and immediately writes in it; no extra membership rows.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 11 RISKS ============ -->
+  <section id="risks" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">11</span>
+      <h2 class="text-2xl font-bold">Risks &amp; notes</h2>
+    </div>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-200 mt-4">
+      <table class="table table-sm">
+        <thead><tr><th>Risk</th><th>Assessment</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="text-sm font-semibold">Actor change alters auth behavior</td>
+            <td class="text-sm text-base-content/70">A scoped super admin now carries a tenant role; unscoped behavior is unchanged.</td>
+            <td class="text-sm text-base-content/70">Add cases to <code>resolve_actor_test.go</code> and the httptest contract suite for ST-17/ST-18 before wiring the UI.</td>
+          </tr>
+          <tr>
+            <td class="text-sm font-semibold">No CSRF token</td>
+            <td class="text-sm text-base-content/70">Mutations ride the session cookie; the API has no anti-CSRF token today.</td>
+            <td class="text-sm text-base-content/70">Single origin + <code>SameSite=Lax</code> blocks cross-site POSTs for this dev UI. If D3 becomes separate-origin, add a CSRF token before exposing beyond localhost.</td>
+          </tr>
+          <tr>
+            <td class="text-sm font-semibold">Tailwind browser CDN in the UI</td>
+            <td class="text-sm text-base-content/70">Runtime JIT adds weight and needs network on first load.</td>
+            <td class="text-sm text-base-content/70">Acceptable for a dev UI; swap to a compiled stylesheet (or drop to plain CSS) when this becomes a real admin app.</td>
+          </tr>
+          <tr>
+            <td class="text-sm font-semibold">Seed password in env</td>
+            <td class="text-sm text-base-content/70">Compose defaults are weak and there is no change-password endpoint.</td>
+            <td class="text-sm text-base-content/70">Treat as dev-only; require a real <code>SEED_PASSWORD</code> outside localhost and add password change in a later module.</td>
+          </tr>
+          <tr>
+            <td class="text-sm font-semibold">Preview is save-then-render</td>
+            <td class="text-sm text-base-content/70">The editor shows <code>content_html</code> only after a successful create/save, not per keystroke.</td>
+            <td class="text-sm text-base-content/70">Intentional for "very simple"; the original plan's keystroke editor (section 11 of the API plan) is the upgrade path and needs a render endpoint or client renderer with golden parity.</td>
+          </tr>
+          <tr>
+            <td class="text-sm font-semibold">Admin list unpaginated</td>
+            <td class="text-sm text-base-content/70"><code>GET /admin/posts</code> returns every visible post.</td>
+            <td class="text-sm text-base-content/70">Fine for dev volumes; add cursor/limit support when post counts grow.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 12 VERIFY ============ -->
+  <section id="verify" class="section-link mt-12">
+    <div class="flex items-center gap-3">
+      <span class="badge badge-primary badge-lg">12</span>
+      <h2 class="text-2xl font-bold">Acceptance &amp; verification</h2>
+    </div>
+    <div class="grid lg:grid-cols-2 gap-4 mt-4">
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Manual flow (the definition of done)</h3>
+          <ol class="text-sm text-base-content/70 list-decimal pl-5 space-y-1">
+            <li><code>cp .env.example .env</code>, set <code>SESSION_KEY</code></li>
+            <li><code>docker compose up --build</code></li>
+            <li>Open <code>http://localhost:8080</code>, sign in as the seeded user</li>
+            <li>Seeded tenant auto-selected; create a post, edit it, publish it</li>
+            <li>"View public" renders the post from <code>/public/...</code></li>
+            <li>Create a new tenant, auto-switch, create a post in it</li>
+            <li>Sign out returns to the login screen; reload keeps the session until logout</li>
+          </ol>
+        </div>
+      </div>
+      <div class="card card-border bg-base-200">
+        <div class="card-body">
+          <h3 class="card-title text-base">Smoke commands</h3>
+          <pre class="mockup-code text-xs"><code>docker compose up -d --build
+curl -sf localhost:8080/livez
+curl -sf localhost:8080/readyz
+
+# login (cookie jar), then identity
+curl -s -c /tmp/c.txt -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"changeme123"}' \
+  localhost:8080/auth/login
+curl -s -b /tmp/c.txt localhost:8080/auth/me
+
+# create tenant (platform), switch, create a post
+curl -s -b /tmp/c.txt -H 'Content-Type: application/json' \
+  -d '{"slug":"acme","name":"Acme"}' localhost:8080/admin/tenants
+curl -s -b /tmp/c.txt -X PUT -H 'Content-Type: application/json' \
+  -d '{"tenant_id":"&lt;id&gt;"}' localhost:8080/auth/me/active-tenant
+curl -s -b /tmp/c.txt -H 'Content-Type: application/json' \
+  -d '{"title":"Hello","content_markdown":"# Hi\n\nbody"}' \
+  localhost:8080/admin/posts</code></pre>
+        </div>
+      </div>
+    </div>
+    <div class="alert alert-success mt-4 sm:alert-horizontal">
+      <span class="text-lg">✓</span>
+      <div class="text-sm">
+        <strong>Test gates.</strong> <code>go test ./...</code> must stay green; the authz change adds coverage for scoped and unscoped
+        super admins, and the httptest suite gains a case asserting a super admin can create a tenant, switch into it, and author a post.
+      </div>
+    </div>
+  </section>
+
+  <footer class="mt-12 pt-6 border-t border-base-content/10 text-xs text-base-content/50">
+    Open Blog UI &amp; dev-stack plan · verified against the working tree at commit 66a20aa · annotate anything to queue feedback.
+  </footer>
+</main>
+
+<!-- ================= code payloads (raw text) ================= -->
+<script type="text/plain" id="code-old-actor">func ResolveActor(ctx context.Context, db *store.DB, userID, tenantID uuid.UUID) (Actor, error) {
+	roleText, err := db.MembershipRole(ctx, userID, tenantID)
+	notMember := errors.Is(err, store.ErrNotMember)
+	if err != nil && !notMember {
+		return Actor{}, err
+	}
+	super, err := db.IsSuperAdmin(ctx, userID)
+	if errors.Is(err, store.ErrNotMember) {
+		return Actor{}, store.ErrNotMember
+	}
+	if err != nil {
+		return Actor{}, err
+	}
+	if super {
+		return Actor{UserID: userID, Platform: true}, nil
+	}
+	if notMember {
+		return Actor{}, store.ErrNotMember
+	}
+	role, err := ParseRole(roleText)
+	if err != nil {
+		return Actor{}, err
+	}
+	return Actor{UserID: userID, Tenant: &tenantID, Role: role}, nil
+}</script>
+
+<script type="text/plain" id="code-new-actor">func ResolveActor(ctx context.Context, db *store.DB, userID, tenantID uuid.UUID) (Actor, error) {
+	super, err := db.IsSuperAdmin(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotMember) {
+			return Actor{}, store.ErrNotMember
+		}
+		return Actor{}, err
+	}
+
+	// No active tenant: a super_admin acts platform-wide, anyone else has no scope.
+	if tenantID == uuid.Nil {
+		if super {
+			return Actor{UserID: userID, Platform: true}, nil
+		}
+		return Actor{}, store.ErrNotMember
+	}
+
+	roleText, err := db.MembershipRole(ctx, userID, tenantID)
+	switch {
+	case err == nil:
+		role, perr := ParseRole(roleText)
+		if perr != nil {
+			return Actor{}, perr
+		}
+		return Actor{UserID: userID, Tenant: &tenantID, Role: role, Platform: super}, nil
+	case errors.Is(err, store.ErrNotMember) && super:
+		// ST-18: a super_admin assumes owner rights inside the active tenant.
+		return Actor{UserID: userID, Tenant: &tenantID, Role: RoleOwner, Platform: true}, nil
+	case errors.Is(err, store.ErrNotMember):
+		return Actor{}, store.ErrNotMember
+	default:
+		return Actor{}, err
+	}
+}</script>
+
+<script type="text/plain" id="code-old-scope">func ScopeFromActor(a Actor) store.Scope {
+	var tenantID uuid.UUID
+	if a.Tenant != nil {
+		tenantID = *a.Tenant
+	}
+	return store.Scope{TenantID: tenantID, Platform: a.Platform}
+}</script>
+
+<script type="text/plain" id="code-new-scope">func ScopeFromActor(a Actor) store.Scope {
+	if a.Tenant != nil {
+		return store.Scope{TenantID: *a.Tenant}
+	}
+	if a.Platform {
+		return store.Scope{Platform: true}
+	}
+	return store.Scope{}
+}</script>
+
+<script type="text/plain" id="code-old-me">func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
+	a := actorFrom(r)
+	scope := scopeFrom(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id":   a.UserID,
+		"tenant_id": nilOrUUID(scope.TenantID),
+		"role":      roleName(a),
+		"platform":  a.Platform,
+	})
+}</script>
+
+<script type="text/plain" id="code-new-me">func (s *server) handleMe(w http.ResponseWriter, r *http.Request) {
+	a := actorFrom(r)
+	scope := scopeFrom(r)
+	memberships, err := s.db.MembershipViews(r.Context(), a.UserID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id":     a.UserID,
+		"tenant_id":   nilOrUUID(scope.TenantID),
+		"role":        roleName(a),
+		"platform":    a.Platform,
+		"memberships": memberships,
+	})
+}</script>
+
+<script type="text/plain" id="code-old-tenant">	userID := actorFrom(r).UserID
+	if _, err := s.db.MembershipRole(r.Context(), userID, req.TenantID); err != nil {
+		writeError(w, http.StatusForbidden, codeForbidden, "not a member of this tenant")
+		return
+	}</script>
+
+<script type="text/plain" id="code-new-tenant">	a := actorFrom(r)
+	if !a.Platform {
+		if _, err := s.db.MembershipRole(r.Context(), a.UserID, req.TenantID); err != nil {
+			writeError(w, http.StatusForbidden, codeForbidden, "not a member of this tenant")
+			return
+		}
+	}</script>
+
+<script type="text/plain" id="code-membership">type MembershipView struct {
+	TenantID uuid.UUID `json:"tenant_id"`
+	Slug     string    `json:"slug"`
+	Name     string    `json:"name"`
+	Role     string    `json:"role"`
+}
+
+// MembershipViews lists the actor's tenants for the UI switcher.
+func (d *DB) MembershipViews(ctx context.Context, actorID uuid.UUID) ([]MembershipView, error) {
+	rows, err := d.pool.Query(ctx, `
+		select m.tenant_id, t.slug, t.name, m.role
+		from memberships m
+		join tenants t on t.id = m.tenant_id
+		where m.user_id = $1
+		order by t.name`, actorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MembershipView{}
+	for rows.Next() {
+		var v MembershipView
+		if err := rows.Scan(&v.TenantID, &v.Slug, &v.Name, &v.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}</script>
+
+<script type="text/plain" id="code-hash">// HashPassword encodes a password with the fixed argon2id parameters; used by
+// the seed command. Runtime signup/login keep the concurrency limiter.
+func HashPassword(password string) (string, error) {
+	return hashPassword(context.Background(), newLimiter(1), password)
+}</script>
+
+<script type="text/plain" id="code-seed">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"openblog/internal/auth"
+	"openblog/internal/store"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "seed:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		return errors.New("DATABASE_URL not set")
+	}
+	email := strings.ToLower(strings.TrimSpace(os.Getenv("SEED_EMAIL")))
+	password := os.Getenv("SEED_PASSWORD")
+	if email == "" || password == "" {
+		return errors.New("SEED_EMAIL and SEED_PASSWORD are required")
+	}
+	super := os.Getenv("SEED_SUPER_ADMIN") != "false"
+	slug := strEnv("SEED_TENANT_SLUG", "demo")
+	name := strEnv("SEED_TENANT_NAME", "Demo Blog")
+	role := strEnv("SEED_ROLE", "owner")
+
+	ctx := context.Background()
+	db, err := store.New(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	userID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	tenantID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+
+	return db.ScopedRW(ctx, store.Scope{}, func(q *store.Queries) error {
+		if err := q.SeedUser(ctx, userID, email, hash, super); err != nil {
+			return err
+		}
+		if err := q.SeedTenant(ctx, tenantID, slug, name); err != nil {
+			return err
+		}
+		return q.SeedMembership(ctx, slug, email, role)
+	})
+}
+
+func strEnv(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}</script>
+
+<script type="text/plain" id="code-seedq">func (q *Queries) SeedUser(ctx context.Context, id uuid.UUID, email, hash string, super bool) error {
+	display := email
+	if i := strings.IndexByte(email, '@'); i > 0 {
+		display = email[:i]
+	}
+	_, err := q.tx.Exec(ctx, `
+		insert into users (id, email, password_hash, display_name, super_admin)
+		values ($1, $2, $3, $4, $5)
+		on conflict (lower(email)) do update
+		  set password_hash = excluded.password_hash,
+		      super_admin   = excluded.super_admin,
+		      display_name  = excluded.display_name`,
+		id, email, hash, display, super)
+	return err
+}
+
+func (q *Queries) SeedTenant(ctx context.Context, id uuid.UUID, slug, name string) error {
+	_, err := q.tx.Exec(ctx, `
+		insert into tenants (id, slug, name) values ($1, $2, $3)
+		on conflict (slug) do nothing`, id, slug, name)
+	return err
+}
+
+func (q *Queries) SeedMembership(ctx context.Context, slug, email, role string) error {
+	_, err := q.tx.Exec(ctx, `
+		insert into memberships (tenant_id, user_id, role)
+		select t.id, u.id, $3
+		from tenants t, users u
+		where t.slug = $1 and lower(u.email) = lower($2)
+		on conflict (tenant_id, user_id) do update set role = excluded.role`,
+		slug, email, role)
+	return err
+}</script>
+
+<script type="text/plain" id="code-compose">name: openblog
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      # non-superuser app role: superusers bypass RLS
+      DATABASE_URL: postgres://blog_app:blog_secret@db:5432/openblog?sslmode=disable
+      SESSION_KEY: ${SESSION_KEY:?set SESSION_KEY to 64 hex chars}
+      PORT: "8080"
+      # same-origin via nginx; CORS stays unused
+      EDITOR_ORIGINS: ""
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/livez"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # migrations run inside the api process before it serves
+
+  seed:
+    build: .
+    entrypoint: ["seed"]
+    environment:
+      DATABASE_URL: postgres://blog_app:blog_secret@db:5432/openblog?sslmode=disable
+      SEED_EMAIL: ${SEED_EMAIL:-admin@example.com}
+      SEED_PASSWORD: ${SEED_PASSWORD:-changeme123}
+      SEED_SUPER_ADMIN: "true"
+      SEED_TENANT_SLUG: ${SEED_TENANT_SLUG:-demo}
+      SEED_TENANT_NAME: ${SEED_TENANT_NAME:-Demo Blog}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+
+  ui:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+
+# deploy/initdb/01-app-role.sql (runs once as postgres superuser):
+#   create role blog_app login password 'blog_secret';
+#   create database openblog owner blog_app;</script>
+
+<script type="text/plain" id="code-dockerfile"># build
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/api     ./cmd/api \
+ && CGO_ENABLED=0 go build -trimpath -o /out/migrate ./cmd/migrate \
+ && CGO_ENABLED=0 go build -trimpath -o /out/seed    ./cmd/seed
+
+# run
+FROM alpine:3.20
+RUN adduser -D -u 10001 app
+COPY --from=build /out/ /usr/local/bin/
+USER app
+EXPOSE 8080
+ENTRYPOINT ["api"]</script>
+
+<script type="text/plain" id="code-nginx">server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # static SPA (hash routes → one file)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # API surface proxied to the Go service on the compose network
+    location ~ ^/(auth|admin|public|livez|readyz)(/|$) {
+        proxy_pass http://api:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}</script>
+
+<script type="text/plain" id="code-env"># cp .env.example .env  — then generate a real key:
+#   openssl rand -hex 32
+SESSION_KEY=
+
+# seed account (dev only)
+SEED_EMAIL=admin@example.com
+SEED_PASSWORD=changeme123
+SEED_TENANT_SLUG=demo
+SEED_TENANT_NAME=Demo Blog</script>
+
+<script type="text/plain" id="code-dockerignore">.git
+.lavish
+docs
+bin
+*.test
+*.out
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+README.md</script>
+
+<!-- ================= renderers ================= -->
+<script type="module">
+  import { File, FileDiff } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+
+  const options = {
+    theme: { light: "github-light", dark: "github-dark" },
+    themeType: "dark",
+    overflow: "wrap",
+  };
+  const txt = (id) => document.getElementById(id).textContent;
+  const mount = (id, render) => {
+    const el = document.querySelector(id);
+    if (el) render(el);
+  };
+
+  mount("#diff-actor", (el) => new FileDiff({ ...options, diffStyle: "split" }).render({
+    containerWrapper: el,
+    oldFile: { name: "internal/authz/actor.go", contents: txt("code-old-actor") },
+    newFile: { name: "internal/authz/actor.go", contents: txt("code-new-actor") },
+  }));
+
+  mount("#diff-scope", (el) => new FileDiff({ ...options, diffStyle: "unified" }).render({
+    containerWrapper: el,
+    oldFile: { name: "internal/authz/scope.go", contents: txt("code-old-scope") },
+    newFile: { name: "internal/authz/scope.go", contents: txt("code-new-scope") },
+  }));
+
+  mount("#diff-me", (el) => new FileDiff({ ...options, diffStyle: "unified" }).render({
+    containerWrapper: el,
+    oldFile: { name: "internal/api/handlers.go — handleMe", contents: txt("code-old-me") },
+    newFile: { name: "internal/api/handlers.go — handleMe", contents: txt("code-new-me") },
+  }));
+
+  mount("#diff-tenant", (el) => new FileDiff({ ...options, diffStyle: "unified" }).render({
+    containerWrapper: el,
+    oldFile: { name: "internal/api/handlers.go — handleSetTenant", contents: txt("code-old-tenant") },
+    newFile: { name: "internal/api/handlers.go — handleSetTenant", contents: txt("code-new-tenant") },
+  }));
+
+  const files = [
+    ["#file-membership", "internal/store/store.go", "code-membership"],
+    ["#file-hash", "internal/auth/password.go", "code-hash"],
+    ["#file-seed", "cmd/seed/main.go", "code-seed"],
+    ["#file-seedq", "internal/store/seed_queries.go", "code-seedq"],
+    ["#file-compose", "docker-compose.yml", "code-compose"],
+    ["#file-dockerfile", "Dockerfile", "code-dockerfile"],
+    ["#file-nginx", "deploy/nginx.conf", "code-nginx"],
+    ["#file-env", ".env.example", "code-env"],
+    ["#file-dockerignore", ".dockerignore", "code-dockerignore"],
+  ];
+  for (const [selector, name, id] of files) {
+    mount(selector, (el) => new File(options).render({
+      containerWrapper: el,
+      file: { name, contents: txt(id) },
+    }));
+  }
+</script>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+  function compositeRgba(foreground, background) {
+    const fa = foreground[3] / 255;
+    const ba = background[3] / 255;
+    const alpha = fa + ba * (1 - fa);
+    if (alpha === 0) return [0, 0, 0, 0];
+    return [
+      (foreground[0] * fa + background[0] * ba * (1 - fa)) / alpha,
+      (foreground[1] * fa + background[1] * ba * (1 - fa)) / alpha,
+      (foreground[2] * fa + background[2] * ba * (1 - fa)) / alpha,
+      alpha * 255,
+    ];
+  }
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    if (a > 0) return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    const cs = getComputedStyle(root).colorScheme;
+    if (cs.includes("dark") && !cs.includes("light")) return true;
+    if (cs.includes("light") && !cs.includes("dark")) return false;
+    return darkQuery.matches;
+  }
+
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied;
+  let rendering = false;
+  let queued = false;
+  function queueRender() {
+    queued = true;
+    if (rendering) return;
+    void render();
+  }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) {
+          el.removeAttribute("data-processed");
+          el.textContent = src;
+        }
+        try {
+          await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+        } catch (error) {
+          console.error("Mermaid diagram render failed:", error);
+          return;
+        }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  const themeObserver = new MutationObserver(queueRender);
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    themeObserver.observe(el, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+  }
+  document.addEventListener("change", queueRender, true);
+  document.addEventListener("transitionend", ({ propertyName }) => {
+    if (propertyName === "background-color") queueRender();
+  }, true);
+  darkQuery.addEventListener("change", queueRender);
+</script>
+
+<script>
+  document.querySelectorAll('form[data-lavish-question]').forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = form.dataset.lavishQuestion;
+      const value = new FormData(form).get(name);
+      if (!value) return;
+      const decision = form.dataset.decision;
+      window.lavish.queuePrompt(`Decision ${decision}: ${value}`, {
+        tag: "choice",
+        text: `${decision} = ${value}`,
+        queueKey: form.dataset.queueKey,
+        element: form,
+        data: { question: name, answer: value },
+      });
+      const note = form.querySelector("[data-queued]");
+      if (note) note.textContent = "Queued: " + value;
+    });
+  });
+</script>
+</body>
+</html>

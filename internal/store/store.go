@@ -120,6 +120,38 @@ func (d *DB) Memberships(ctx context.Context, actorID uuid.UUID) ([]Membership, 
 	return ms, rows.Err()
 }
 
+// MembershipView is one actor membership with the tenant fields the UI needs.
+type MembershipView struct {
+	TenantID uuid.UUID `json:"tenant_id"`
+	Slug     string    `json:"slug"`
+	Name     string    `json:"name"`
+	Role     string    `json:"role"`
+}
+
+// MembershipViews lists the actor's tenants for the UI switcher; the query
+// always binds actorID server-side and accepts no foreign user id.
+func (d *DB) MembershipViews(ctx context.Context, actorID uuid.UUID) ([]MembershipView, error) {
+	rows, err := d.pool.Query(ctx, `
+		select m.tenant_id, t.slug, t.name, m.role
+		from memberships m
+		join tenants t on t.id = m.tenant_id
+		where m.user_id = $1
+		order by t.name`, actorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MembershipView{}
+	for rows.Next() {
+		var v MembershipView
+		if err := rows.Scan(&v.TenantID, &v.Slug, &v.Name, &v.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) IsSuperAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
 	var ok bool
 	err := d.pool.QueryRow(ctx,

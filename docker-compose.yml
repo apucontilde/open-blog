@@ -1,0 +1,96 @@
+name: openblog
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      # non-superuser app role: superusers bypass RLS
+      DATABASE_URL: postgres://blog_app:blog_secret@db:5432/openblog?sslmode=disable
+      SESSION_KEY: ${SESSION_KEY:?set SESSION_KEY to 64 hex chars}
+      PORT: "8080"
+      # set true when serving over Tailscale HTTPS (disables plain-http localhost login)
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # same-origin via nginx; CORS stays unused
+      EDITOR_ORIGINS: ""
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/livez"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  seed:
+    build: .
+    entrypoint: ["seed"]
+    environment:
+      DATABASE_URL: postgres://blog_app:blog_secret@db:5432/openblog?sslmode=disable
+      SEED_EMAIL: ${SEED_EMAIL:-admin@example.com}
+      SEED_PASSWORD: ${SEED_PASSWORD:-changeme123}
+      SEED_SUPER_ADMIN: "true"
+      SEED_TENANT_SLUG: ${SEED_TENANT_SLUG:-demo}
+      SEED_TENANT_NAME: ${SEED_TENANT_NAME:-Demo Blog}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+
+  ui:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # Tailnet exposure: joins the tailnet and shares the ui (nginx) network
+  # namespace, so tailnet traffic to :80 reaches nginx directly. No Serve
+  # proxy or HTTPS certs required. Start with:
+  #   docker compose --profile tailscale up -d
+  # Then reach it at: http://<host>.<tailnet>.ts.net/
+  tailscale:
+    image: tailscale/tailscale:latest
+    profiles: ["tailscale"]
+    network_mode: "service:ui"
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_HOSTNAME: openblog
+      # kernel networking (shared netns) instead of userspace netstack
+      TS_USERSPACE: "false"
+    volumes:
+      - ts-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    depends_on:
+      - ui
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ts-state:

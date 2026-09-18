@@ -15,6 +15,7 @@ func TestScopeFromActor(t *testing.T) {
 		wantPlat bool
 	}{
 		{"platform super admin", Actor{UserID: tid, Platform: true}, uuid.Nil, true},
+		{"platform actor with active tenant", Actor{UserID: tid, Platform: true, Tenant: &tid, Role: RoleOwner}, tid, false},
 		{"author in tenant", Actor{UserID: tid, Tenant: &tid, Role: RoleAuthor}, tid, false},
 		{"editor in tenant", Actor{UserID: tid, Tenant: &tid, Role: RoleEditor}, tid, false},
 		{"admin in tenant", Actor{UserID: tid, Tenant: &tid, Role: RoleAdmin}, tid, false},

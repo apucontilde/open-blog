@@ -1,17 +1,18 @@
 package authz
 
 import (
-	"github.com/google/uuid"
-
 	"openblog/internal/store"
 )
 
-// ScopeFromActor is the only scope-construction site. Platform is never
-// settable from session data or params — only a Platform Actor yields it.
+// ScopeFromActor is the only scope-construction site. An active tenant always
+// scopes to that tenant, even for a super_admin (RLS stays on); only a
+// platform-only actor, one with no tenant, gets the cross-tenant bypass.
 func ScopeFromActor(a Actor) store.Scope {
-	var tenantID uuid.UUID
 	if a.Tenant != nil {
-		tenantID = *a.Tenant
+		return store.Scope{TenantID: *a.Tenant}
 	}
-	return store.Scope{TenantID: tenantID, Platform: a.Platform}
+	if a.Platform {
+		return store.Scope{Platform: true}
+	}
+	return store.Scope{}
 }

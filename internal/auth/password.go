@@ -66,6 +66,12 @@ func hashPassword(ctx context.Context, l *limiter, password string) (string, err
 		base64.RawStdEncoding.EncodeToString(key)), nil
 }
 
+// HashPassword encodes a password with the fixed argon2id parameters; used by
+// the seed command. Runtime signup/login keep the concurrency limiter.
+func HashPassword(password string) (string, error) {
+	return hashPassword(context.Background(), newLimiter(1), password)
+}
+
 // verifyPassword compares in constant time; malformed encodings fail closed.
 func verifyPassword(ctx context.Context, l *limiter, encoded, password string) error {
 	if err := l.acquire(ctx); err != nil {

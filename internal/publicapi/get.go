@@ -82,6 +82,47 @@ func (a *API) Get(r *http.Request, tenantSlug, postSlug string) (*Response, erro
 	return jsonResponse(http.StatusOK, body, v)
 }
 
+// GetHTML serves only the published post's rendered HTML with an HTML content
+// type, so the response body can be opened directly in a browser. It is the
+// same server-sanitized content_html the JSON read exposes.
+func (a *API) GetHTML(r *http.Request, tenantSlug, postSlug string) (*Response, error) {
+	ctx := r.Context()
+	id, _, err := a.resolver.ResolveSlug(ctx, tenantSlug)
+	if resp, handled := resolveTenant(err); handled {
+		return resp, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if postSlug == "" {
+		return errorResponse(http.StatusNotFound, "post not found"), nil
+	}
+
+	var (
+		contentHTML string
+		updatedAt   time.Time
+	)
+	err = a.db.Scoped(ctx, store.Scope{TenantID: id}, func(q *store.Queries) error {
+		return q.Tx().QueryRow(ctx, `
+			select content_html, updated_at
+			from posts
+			where tenant_id = $1 and slug = $2 and status = 'published'`, id, postSlug).
+			Scan(&contentHTML, &updatedAt)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errorResponse(http.StatusNotFound, "post not found"), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	v := etag(len(contentHTML), updatedAt.UnixNano())
+	if etagMatches(r.Header.Get("If-None-Match"), v) {
+		return notModified(v), nil
+	}
+	return htmlResponse([]byte(contentHTML), v), nil
+}
+
 func (a *API) decodeImages(raw []byte) []imageItem {
 	var raws []json.RawMessage
 	if err := json.Unmarshal(raw, &raws); err != nil {

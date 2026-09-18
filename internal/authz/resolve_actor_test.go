@@ -63,14 +63,34 @@ func TestResolveActor(t *testing.T) {
 			t.Fatalf("bad actor: %+v", a)
 		}
 	})
-	t.Run("super_admin resolves platform-wide", func(t *testing.T) {
+	t.Run("super_admin with no active tenant resolves platform-wide", func(t *testing.T) {
 		u, _ := seed(t, db, true, "")
-		a, err := ResolveActor(context.Background(), db, u, uuid.New())
+		a, err := ResolveActor(context.Background(), db, u, uuid.Nil)
 		if err != nil {
 			t.Fatalf("ResolveActor: %v", err)
 		}
 		if !a.Platform || a.Tenant != nil || a.Role != 0 {
 			t.Fatalf("bad platform actor: %+v", a)
+		}
+	})
+	t.Run("super_admin assumes owner in an active tenant", func(t *testing.T) {
+		u, t2 := seed(t, db, true, "")
+		a, err := ResolveActor(context.Background(), db, u, t2)
+		if err != nil {
+			t.Fatalf("ResolveActor: %v", err)
+		}
+		if !a.Platform || a.Tenant == nil || *a.Tenant != t2 || a.Role != RoleOwner {
+			t.Fatalf("bad scoped platform actor: %+v", a)
+		}
+	})
+	t.Run("super_admin member keeps the member role", func(t *testing.T) {
+		u, t2 := seed(t, db, true, "editor")
+		a, err := ResolveActor(context.Background(), db, u, t2)
+		if err != nil {
+			t.Fatalf("ResolveActor: %v", err)
+		}
+		if !a.Platform || a.Tenant == nil || *a.Tenant != t2 || a.Role != RoleEditor {
+			t.Fatalf("bad scoped super actor: %+v", a)
 		}
 	})
 	t.Run("non-member non-super is ErrNotMember", func(t *testing.T) {
